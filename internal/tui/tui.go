@@ -57,8 +57,8 @@ type Model struct {
 	inputMode bool
 
 	// Suggestion handling
-	suggestionHandler  *SuggestionHandler
-	pendingSuggestion  *SuggestionResult
+	suggestionHandler   *SuggestionHandler
+	pendingSuggestion   *SuggestionResult
 	toolCallAccumulator *ToolCallAccumulator
 }
 
@@ -69,9 +69,15 @@ func New(proj *project.Project, searchEngine *search.FTSEngine) *Model {
 	ta.Focus()
 	ta.CharLimit = 4000
 	ta.SetWidth(80)
-	ta.SetHeight(3)
+	ta.SetHeight(1)
 	ta.ShowLineNumbers = false
 	ta.KeyMap.InsertNewline.SetEnabled(false)
+	ta.Prompt = "> "
+	ta.FocusedStyle.Prompt = styles.InputPrompt
+	ta.FocusedStyle.Text = styles.InputText
+	ta.FocusedStyle.Placeholder = styles.MutedText
+	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
+	ta.BlurredStyle = ta.FocusedStyle
 
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
@@ -715,7 +721,6 @@ func (m *Model) View() string {
 
 	// Input area (only in chat view)
 	if m.view == ViewChat {
-		sb.WriteString(styles.InputPrompt.Render("> "))
 		sb.WriteString(m.textarea.View())
 	}
 
