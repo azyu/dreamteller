@@ -103,7 +103,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		return m.handleKeyMsg(msg)
+		// Handle special keys first
+		model, cmd := m.handleKeyMsg(msg)
+		if cmd != nil {
+			return model, cmd
+		}
+		// If no command returned, continue to update textarea below
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -170,6 +175,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // handleKeyMsg handles keyboard input.
+// Returns (model, cmd) where cmd is nil if the key should be passed to textarea.
 func (m *Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Handle suggestion view keys
 	if m.view == ViewSuggestion {
@@ -190,6 +196,7 @@ func (m *Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyEsc:
 		if m.view != ViewChat {
 			m.view = ViewChat
+			m.updateViewport()
 			return m, nil
 		}
 		if m.streaming {
@@ -198,6 +205,7 @@ func (m *Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.textarea.Focus()
 			return m, nil
 		}
+		// Let Esc pass through to textarea (clears input)
 
 	case tea.KeyEnter:
 		if !m.streaming && m.inputMode {
@@ -205,6 +213,7 @@ func (m *Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	// Return nil cmd to let the key pass through to textarea
 	return m, nil
 }
 
