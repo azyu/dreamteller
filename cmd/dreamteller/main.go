@@ -696,10 +696,36 @@ func init() {
 }
 
 func runTUI(proj *project.Project) error {
-	// Initialize the search engine
 	searchEngine := search.NewFTSEngine(proj.DB)
 
-	model := tui.New(proj, searchEngine)
+	application, err := app.New()
+	if err != nil {
+		return fmt.Errorf("failed to initialize app: %w", err)
+	}
+
+	globalConfig, err := application.Config.LoadGlobalConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	providerName := globalConfig.Defaults.Provider
+	if providerName == "" {
+		providerName = "openai"
+	}
+
+	providerConfig, err := application.Config.GetProviderConfig(providerName)
+	if err != nil {
+		return fmt.Errorf("failed to get provider config: %w", err)
+	}
+
+	ctx := context.Background()
+	provider, err := initLLMProvider(ctx, providerName, providerConfig)
+	if err != nil {
+		return fmt.Errorf("failed to initialize LLM provider: %w", err)
+	}
+	defer provider.Close()
+
+	model := tui.New(proj, provider, searchEngine)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {

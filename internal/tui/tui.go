@@ -2,6 +2,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -35,10 +36,10 @@ type Message struct {
 
 // Model is the main TUI model.
 type Model struct {
-	// Project
-	project *project.Project
+	project      *project.Project
+	provider     llm.Provider
+	searchEngine *search.FTSEngine
 
-	// View state
 	view       ViewState
 	width      int
 	height     int
@@ -46,24 +47,23 @@ type Model struct {
 	err        error
 	statusText string
 
-	// Chat components
 	viewport viewport.Model
 	textarea textarea.Model
 	spinner  spinner.Model
 	messages []Message
 
-	// State flags
-	streaming bool
-	inputMode bool
+	streaming        bool
+	inputMode        bool
+	streamController *StreamController
+	streamChan       <-chan llm.StreamChunk
 
-	// Suggestion handling
 	suggestionHandler   *SuggestionHandler
 	pendingSuggestion   *SuggestionResult
 	toolCallAccumulator *ToolCallAccumulator
 }
 
 // New creates a new TUI model.
-func New(proj *project.Project, searchEngine *search.FTSEngine) *Model {
+func New(proj *project.Project, provider llm.Provider, searchEngine *search.FTSEngine) *Model {
 	ta := textarea.New()
 	ta.Placeholder = "Enter your message... (/help for commands)"
 	ta.Focus()
@@ -85,6 +85,8 @@ func New(proj *project.Project, searchEngine *search.FTSEngine) *Model {
 
 	return &Model{
 		project:             proj,
+		provider:            provider,
+		searchEngine:        searchEngine,
 		textarea:            ta,
 		spinner:             sp,
 		messages:            []Message{},
@@ -191,10 +193,7 @@ func (m *Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyCtrlC:
 		if m.streaming {
-			// Cancel streaming
-			m.streaming = false
-			m.inputMode = true
-			m.textarea.Focus()
+			m.cancelStream()
 			return m, nil
 		}
 		return m, tea.Quit
@@ -206,9 +205,7 @@ func (m *Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.streaming {
-			m.streaming = false
-			m.inputMode = true
-			m.textarea.Focus()
+			m.cancelStream()
 			return m, nil
 		}
 		// Let Esc pass through to textarea (clears input)
@@ -330,13 +327,10 @@ func (m *Model) returnToChat() (tea.Model, tea.Cmd) {
 
 // handleStreamChunk handles incoming stream chunks.
 func (m *Model) handleStreamChunk(msg StreamChunkMsg) (tea.Model, tea.Cmd) {
-	// Handle tool call deltas
 	if msg.ToolCall != nil {
 		m.toolCallAccumulator.AddDelta(msg.ToolCall)
-		return m, m.spinner.Tick
 	}
 
-	// Handle text content
 	if msg.Content != "" {
 		if len(m.messages) > 0 && m.messages[len(m.messages)-1].Role == "assistant" {
 			m.messages[len(m.messages)-1].Content += msg.Content
@@ -349,12 +343,15 @@ func (m *Model) handleStreamChunk(msg StreamChunkMsg) (tea.Model, tea.Cmd) {
 		m.updateViewport()
 	}
 
-	// Check if stream is done with tool calls
-	if msg.Done && m.toolCallAccumulator.HasCalls() {
-		return m.processToolCalls()
+	if msg.Done {
+		if m.toolCallAccumulator.HasCalls() {
+			return m.processToolCalls()
+		}
+		m.streamChan = nil
+		return m, func() tea.Msg { return StreamDoneMsg{} }
 	}
 
-	return m, m.spinner.Tick
+	return m, tea.Batch(m.spinner.Tick, m.readNextChunk())
 }
 
 // processToolCalls processes accumulated tool calls.
@@ -389,27 +386,34 @@ func (m *Model) handleSubmit() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Check for slash commands
 	if strings.HasPrefix(input, "/") {
 		return m.handleCommand(input)
 	}
 
-	// Add user message
 	m.messages = append(m.messages, Message{
 		Role:    "user",
 		Content: input,
 	})
 
-	// Clear input
 	m.textarea.Reset()
 	m.updateViewport()
 
-	// Start streaming (placeholder - will be implemented with LLM)
+	if m.streamController != nil {
+		m.streamController.Cancel()
+	}
+
 	m.streaming = true
 	m.inputMode = false
 
-	// For now, return a mock response
-	return m, m.mockStreamResponse()
+	if m.provider == nil {
+		m.messages = append(m.messages, Message{
+			Role:    "assistant",
+			Content: "No LLM provider configured. Please set up a provider in your config.",
+		})
+		return m, func() tea.Msg { return StreamDoneMsg{} }
+	}
+
+	return m, m.startStream(input)
 }
 
 // handleCommand processes slash commands.
@@ -470,24 +474,110 @@ func (m *Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// mockStreamResponse simulates streaming for testing.
-func (m *Model) mockStreamResponse() tea.Cmd {
-	return func() tea.Msg {
-		// Simulate AI response
-		response := "I understand you want to work on your novel. What would you like to do? I can help you:\n\n" +
-			"- Develop your characters further\n" +
-			"- Work on plot points\n" +
-			"- Write or edit chapters\n" +
-			"- Explore world-building details\n\n" +
-			"Just let me know what you'd like to focus on!"
+// startStream starts a streaming response from the LLM provider.
+func (m *Model) startStream(userInput string) tea.Cmd {
+	systemPrompt := m.buildSystemPrompt(userInput)
+	chatMessages := m.buildChatMessages(systemPrompt)
 
-		m.messages = append(m.messages, Message{
-			Role:    "assistant",
-			Content: response,
-		})
-
-		return StreamDoneMsg{}
+	req := llm.ChatRequest{
+		Messages:    chatMessages,
+		MaxTokens:   4096,
+		Temperature: 0.7,
+		Tools:       llm.PredefinedTools(),
 	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), DefaultStreamConfig().Timeout)
+	m.streamController = &StreamController{ctx: ctx, cancel: cancel, config: DefaultStreamConfig()}
+
+	streamChan, err := m.provider.Stream(ctx, req)
+	if err != nil {
+		return func() tea.Msg { return StreamErrorMsg{Err: err} }
+	}
+	m.streamChan = streamChan
+
+	return m.readNextChunk()
+}
+
+func (m *Model) readNextChunk() tea.Cmd {
+	return func() tea.Msg {
+		if m.streamChan == nil {
+			return StreamDoneMsg{}
+		}
+
+		chunk, ok := <-m.streamChan
+		if !ok {
+			return StreamChunkMsg{Done: true}
+		}
+
+		if chunk.Error != nil {
+			return StreamErrorMsg{Err: chunk.Error}
+		}
+
+		return StreamChunkMsg{
+			Content:  chunk.Delta,
+			ToolCall: chunk.ToolCall,
+			Done:     chunk.Done,
+		}
+	}
+}
+
+// buildSystemPrompt builds the system prompt with project context.
+func (m *Model) buildSystemPrompt(userInput string) string {
+	builder := llm.NewSystemPromptBuilder()
+	builder.AddRole(llm.DefaultNovelWritingPrompt())
+
+	if m.project != nil && m.project.Info != nil {
+		builder.AddProjectInfo(m.project.Info.Name, m.project.Config.Genre)
+		builder.AddWritingStyle(m.project.Config.Writing)
+	}
+
+	if m.searchEngine != nil && userInput != "" {
+		results, err := m.searchEngine.Search(userInput, 8)
+		if err == nil && len(results) > 0 {
+			chunks := make([]llm.ContextChunk, 0, len(results))
+			for _, r := range results {
+				chunks = append(chunks, llm.ContextChunk{
+					Content:    r.Content,
+					SourceType: r.SourceType,
+					SourcePath: r.SourcePath,
+					Score:      r.Score,
+				})
+			}
+			contextPrompt := (&llm.ContextManager{}).BuildContextPrompt(chunks)
+			builder.AddContext(contextPrompt)
+		}
+	}
+
+	return builder.Build()
+}
+
+// buildChatMessages converts internal messages to LLM format.
+func (m *Model) buildChatMessages(systemPrompt string) []llm.ChatMessage {
+	messages := []llm.ChatMessage{
+		llm.NewSystemMessage(systemPrompt),
+	}
+
+	for _, msg := range m.messages {
+		switch msg.Role {
+		case "user":
+			messages = append(messages, llm.NewUserMessage(msg.Content))
+		case "assistant":
+			messages = append(messages, llm.NewAssistantMessage(msg.Content))
+		}
+	}
+
+	return messages
+}
+
+// cancelStream cancels the current streaming operation.
+func (m *Model) cancelStream() {
+	if m.streamController != nil {
+		m.streamController.Cancel()
+	}
+	m.streaming = false
+	m.inputMode = true
+	m.streamChan = nil
+	m.textarea.Focus()
 }
 
 // updateViewport updates the viewport content.
