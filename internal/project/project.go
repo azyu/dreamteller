@@ -367,3 +367,40 @@ func (p *Project) CreateContextFile(category, filename, content string) error {
 	}
 	return p.FS.WriteMarkdown(path, content)
 }
+
+// WriteContextContent writes or updates context content based on operation.
+func (p *Project) WriteContextContent(category, filename, content, operation string) error {
+	path := filepath.Join("context", category, filename)
+	if !strings.HasSuffix(path, ".md") {
+		path += ".md"
+	}
+
+	switch operation {
+	case "create", "update":
+		return p.FS.WriteMarkdown(path, content)
+	case "append":
+		existing, err := p.FS.ReadMarkdown(path)
+		if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("failed to read existing file: %w", err)
+		}
+		newContent := existing + "\n\n" + content
+		return p.FS.WriteMarkdown(path, newContent)
+	default:
+		return fmt.Errorf("unknown operation: %s", operation)
+	}
+}
+
+// WriteCharacterContent writes character content.
+func (p *Project) WriteCharacterContent(filename, content, operation string) error {
+	return p.WriteContextContent("characters", filename, content, operation)
+}
+
+// WriteSettingContent writes setting content.
+func (p *Project) WriteSettingContent(filename, content, operation string) error {
+	return p.WriteContextContent("settings", filename, content, operation)
+}
+
+// WritePlotContent writes plot content.
+func (p *Project) WritePlotContent(filename, content, operation string) error {
+	return p.WriteContextContent("plot", filename, content, operation)
+}

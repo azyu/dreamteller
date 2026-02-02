@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/azyu/dreamteller/internal/llm"
 	"github.com/azyu/dreamteller/internal/project"
+	"github.com/azyu/dreamteller/internal/search"
 	"github.com/azyu/dreamteller/internal/tui/styles"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
@@ -22,6 +24,7 @@ const (
 	ViewHelp
 	ViewContext
 	ViewChapters
+	ViewSuggestion
 )
 
 // Message represents a chat message.
@@ -52,10 +55,15 @@ type Model struct {
 	// State flags
 	streaming bool
 	inputMode bool
+
+	// Suggestion handling
+	suggestionHandler  *SuggestionHandler
+	pendingSuggestion  *SuggestionResult
+	toolCallAccumulator *ToolCallAccumulator
 }
 
 // New creates a new TUI model.
-func New(proj *project.Project) *Model {
+func New(proj *project.Project, searchEngine *search.FTSEngine) *Model {
 	ta := textarea.New()
 	ta.Placeholder = "Enter your message... (/help for commands)"
 	ta.Focus()
@@ -70,12 +78,14 @@ func New(proj *project.Project) *Model {
 	sp.Style = styles.Spinner
 
 	return &Model{
-		project:   proj,
-		textarea:  ta,
-		spinner:   sp,
-		messages:  []Message{},
-		inputMode: true,
-		view:      ViewChat,
+		project:             proj,
+		textarea:            ta,
+		spinner:             sp,
+		messages:            []Message{},
+		inputMode:           true,
+		view:                ViewChat,
+		suggestionHandler:   NewSuggestionHandler(proj, searchEngine),
+		toolCallAccumulator: NewToolCallAccumulator(),
 	}
 }
 
@@ -135,6 +145,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case errMsg:
 		m.err = msg.err
+
+	case SuggestionMsg:
+		m.pendingSuggestion = msg.Suggestion
+		m.view = ViewSuggestion
+		m.streaming = false
+		m.inputMode = false
+		m.updateViewport()
 	}
 
 	// Update textarea if in input mode
@@ -154,6 +171,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // handleKeyMsg handles keyboard input.
 func (m *Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Handle suggestion view keys
+	if m.view == ViewSuggestion {
+		return m.handleSuggestionKey(msg)
+	}
+
 	switch msg.Type {
 	case tea.KeyCtrlC:
 		if m.streaming {
@@ -186,20 +208,163 @@ func (m *Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleStreamChunk handles incoming stream chunks.
-func (m *Model) handleStreamChunk(msg StreamChunkMsg) (tea.Model, tea.Cmd) {
-	// Append chunk to the last assistant message or create new one
-	if len(m.messages) > 0 && m.messages[len(m.messages)-1].Role == "assistant" {
-		m.messages[len(m.messages)-1].Content += msg.Content
+// handleSuggestionKey handles keyboard input in suggestion view.
+func (m *Model) handleSuggestionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		return m.rejectSuggestion()
+	case tea.KeyRunes:
+		key := string(msg.Runes)
+		switch key {
+		case "a", "y":
+			return m.acceptSuggestion()
+		case "r", "n":
+			return m.rejectSuggestion()
+		case "m", "e":
+			// Modify - return to chat with suggestion context
+			if m.pendingSuggestion != nil {
+				m.messages = append(m.messages, Message{
+					Role:    "system",
+					Content: fmt.Sprintf("Suggestion pending modification: %s", m.pendingSuggestion.Title),
+				})
+			}
+			m.pendingSuggestion = nil
+			m.view = ViewChat
+			m.inputMode = true
+			m.textarea.Focus()
+			m.updateViewport()
+			return m, nil
+		default:
+			// Check if the key matches an action
+			if m.pendingSuggestion != nil {
+				for _, action := range m.pendingSuggestion.Actions {
+					if action.Key == key && action.Handler != nil {
+						if err := action.Handler(); err != nil {
+							m.err = err
+						} else {
+							m.messages = append(m.messages, Message{
+								Role:    "system",
+								Content: fmt.Sprintf("Selected: %s", action.Label),
+							})
+						}
+						m.pendingSuggestion = nil
+						m.view = ViewChat
+						m.inputMode = true
+						m.textarea.Focus()
+						m.updateViewport()
+						return m, nil
+					}
+				}
+			}
+		}
+	}
+	return m, nil
+}
+
+// acceptSuggestion handles accepting a pending suggestion.
+func (m *Model) acceptSuggestion() (tea.Model, tea.Cmd) {
+	if m.pendingSuggestion == nil {
+		return m.returnToChat()
+	}
+
+	// For context updates that require approval, execute the update
+	if m.pendingSuggestion.RequiresApproval && m.pendingSuggestion.Type == SuggestionTypeContextUpdate {
+		update, ok := m.pendingSuggestion.ParsedData.(llm.ContextUpdate)
+		if ok {
+			if err := m.suggestionHandler.ExecuteContextUpdate(update); err != nil {
+				m.err = err
+			} else {
+				m.messages = append(m.messages, Message{
+					Role:    "system",
+					Content: fmt.Sprintf("Context update applied: %s/%s.md", update.FileType, update.FileName),
+				})
+			}
+		}
 	} else {
+		// For other suggestions, just acknowledge
 		m.messages = append(m.messages, Message{
-			Role:    "assistant",
-			Content: msg.Content,
+			Role:    "system",
+			Content: fmt.Sprintf("Accepted: %s", m.pendingSuggestion.Title),
 		})
 	}
 
+	return m.returnToChat()
+}
+
+// rejectSuggestion handles rejecting a pending suggestion.
+func (m *Model) rejectSuggestion() (tea.Model, tea.Cmd) {
+	if m.pendingSuggestion != nil {
+		m.messages = append(m.messages, Message{
+			Role:    "system",
+			Content: fmt.Sprintf("Rejected: %s", m.pendingSuggestion.Title),
+		})
+	}
+
+	return m.returnToChat()
+}
+
+// returnToChat returns from suggestion view to chat view.
+func (m *Model) returnToChat() (tea.Model, tea.Cmd) {
+	m.pendingSuggestion = nil
+	m.view = ViewChat
+	m.inputMode = true
+	m.textarea.Focus()
 	m.updateViewport()
+	return m, nil
+}
+
+// handleStreamChunk handles incoming stream chunks.
+func (m *Model) handleStreamChunk(msg StreamChunkMsg) (tea.Model, tea.Cmd) {
+	// Handle tool call deltas
+	if msg.ToolCall != nil {
+		m.toolCallAccumulator.AddDelta(msg.ToolCall)
+		return m, m.spinner.Tick
+	}
+
+	// Handle text content
+	if msg.Content != "" {
+		if len(m.messages) > 0 && m.messages[len(m.messages)-1].Role == "assistant" {
+			m.messages[len(m.messages)-1].Content += msg.Content
+		} else {
+			m.messages = append(m.messages, Message{
+				Role:    "assistant",
+				Content: msg.Content,
+			})
+		}
+		m.updateViewport()
+	}
+
+	// Check if stream is done with tool calls
+	if msg.Done && m.toolCallAccumulator.HasCalls() {
+		return m.processToolCalls()
+	}
+
 	return m, m.spinner.Tick
+}
+
+// processToolCalls processes accumulated tool calls.
+func (m *Model) processToolCalls() (tea.Model, tea.Cmd) {
+	calls := m.toolCallAccumulator.GetCompletedCalls()
+	m.toolCallAccumulator.Reset()
+
+	if len(calls) == 0 {
+		return m, nil
+	}
+
+	// Process the first tool call (support single tool call for now)
+	call := calls[0]
+	suggestion, err := m.suggestionHandler.HandleToolCall(call)
+	if err != nil {
+		m.err = err
+		m.streaming = false
+		m.inputMode = true
+		m.textarea.Focus()
+		return m, nil
+	}
+
+	return m, func() tea.Msg {
+		return SuggestionMsg{Suggestion: suggestion}
+	}
 }
 
 // handleSubmit processes user input.
@@ -323,6 +488,8 @@ func (m *Model) updateViewport() {
 		content = m.renderContext()
 	case ViewChapters:
 		content = m.renderChapters()
+	case ViewSuggestion:
+		content = m.renderSuggestion()
 	}
 
 	m.viewport.SetContent(content)
@@ -462,6 +629,48 @@ func (m *Model) renderChapters() string {
 	return sb.String()
 }
 
+// renderSuggestion renders the suggestion view.
+func (m *Model) renderSuggestion() string {
+	var sb strings.Builder
+
+	if m.pendingSuggestion == nil {
+		sb.WriteString(styles.MutedText.Render("No pending suggestion."))
+		return sb.String()
+	}
+
+	// Title
+	sb.WriteString(styles.Title.Render(m.pendingSuggestion.Title))
+	sb.WriteString("\n\n")
+
+	// Content
+	sb.WriteString(m.pendingSuggestion.Content)
+	sb.WriteString("\n")
+
+	// Actions
+	if len(m.pendingSuggestion.Actions) > 0 {
+		sb.WriteString(styles.Subtitle.Render("Actions:"))
+		sb.WriteString("\n")
+		for _, action := range m.pendingSuggestion.Actions {
+			sb.WriteString(fmt.Sprintf("  [%s] %s\n", styles.HelpKey.Render(action.Key), action.Label))
+		}
+		sb.WriteString("\n")
+	}
+
+	// Standard controls
+	if m.pendingSuggestion.RequiresApproval {
+		sb.WriteString(styles.InfoText.Render("This action requires your approval."))
+		sb.WriteString("\n\n")
+		sb.WriteString(fmt.Sprintf("  [%s] Accept  ", styles.HelpKey.Render("a")))
+		sb.WriteString(fmt.Sprintf("[%s] Reject  ", styles.HelpKey.Render("r")))
+		sb.WriteString(fmt.Sprintf("[%s] Edit", styles.HelpKey.Render("e")))
+	} else {
+		sb.WriteString(fmt.Sprintf("  [%s] OK  ", styles.HelpKey.Render("a")))
+		sb.WriteString(fmt.Sprintf("[%s] Dismiss", styles.HelpKey.Render("Esc")))
+	}
+
+	return sb.String()
+}
+
 // View renders the TUI.
 func (m *Model) View() string {
 	if !m.ready {
@@ -511,7 +720,9 @@ func (m *Model) View() string {
 
 // Message types for streaming
 type StreamChunkMsg struct {
-	Content string
+	Content  string
+	ToolCall *llm.ToolCallDelta
+	Done     bool
 }
 
 type StreamDoneMsg struct{}

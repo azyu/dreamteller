@@ -7,6 +7,7 @@ import (
 
 	"github.com/azyu/dreamteller/internal/app"
 	"github.com/azyu/dreamteller/internal/project"
+	"github.com/azyu/dreamteller/internal/search"
 	"github.com/azyu/dreamteller/internal/tui"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
@@ -183,7 +184,10 @@ func init() {
 }
 
 func runTUI(proj *project.Project) error {
-	model := tui.New(proj)
+	// Initialize the search engine
+	searchEngine := search.NewFTSEngine(proj.DB)
+
+	model := tui.New(proj, searchEngine)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {
