@@ -39,3 +39,10 @@ Thumbs.db
 
 # Debug
 debug.log
+
+# AI assistant configs
+.claude/
+.serena/
+
+# Test binaries
+dreamteller_test
