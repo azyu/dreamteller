@@ -43,6 +43,7 @@ debug.log
 # AI assistant configs
 .claude/
 .serena/
+.sisyphus/
 
 # Test binaries
 dreamteller_test
