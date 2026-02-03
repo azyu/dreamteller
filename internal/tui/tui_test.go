@@ -17,7 +17,7 @@ import (
 
 func TestNew(t *testing.T) {
 	t.Run("creates model with nil project", func(t *testing.T) {
-		m := New(nil, nil, nil)
+		m := New(nil, nil, nil, "test-model", "", "")
 
 		assert.NotNil(t, m)
 		assert.Nil(t, m.project)
@@ -29,7 +29,7 @@ func TestNew(t *testing.T) {
 	})
 
 	t.Run("initializes textarea correctly", func(t *testing.T) {
-		m := New(nil, nil, nil)
+		m := New(nil, nil, nil, "test-model", "", "")
 
 		assert.Equal(t, 4000, m.textarea.CharLimit)
 		assert.Contains(t, m.textarea.Placeholder, "/help")
@@ -37,14 +37,14 @@ func TestNew(t *testing.T) {
 	})
 
 	t.Run("initializes spinner", func(t *testing.T) {
-		m := New(nil, nil, nil)
+		m := New(nil, nil, nil, "test-model", "", "")
 
 		assert.NotNil(t, m.spinner)
 		assert.Equal(t, spinner.Dot, m.spinner.Spinner)
 	})
 
 	t.Run("initializes suggestion handler and accumulator", func(t *testing.T) {
-		m := New(nil, nil, nil)
+		m := New(nil, nil, nil, "test-model", "", "")
 
 		assert.NotNil(t, m.suggestionHandler)
 		assert.NotNil(t, m.toolCallAccumulator)
@@ -52,10 +52,36 @@ func TestNew(t *testing.T) {
 }
 
 func TestInit(t *testing.T) {
-	m := New(nil, nil, nil)
+	m := New(nil, nil, nil, "test-model", "", "")
 	cmd := m.Init()
 
 	assert.NotNil(t, cmd, "Init should return a command")
+}
+
+func TestModelsListMsg(t *testing.T) {
+	m := newTestModel(t)
+	msg := modelsListMsg{models: []string{"alpha", "beta"}}
+
+	model, _ := m.Update(msg)
+	m = model.(*Model)
+
+	assert.True(t, m.modelSelectMode)
+	assert.Equal(t, []string{"alpha", "beta"}, m.availableModels)
+	assert.Equal(t, 0, m.modelSelectIndex)
+	assert.False(t, m.inputMode)
+}
+
+func TestModelSelectKeyEnter(t *testing.T) {
+	m := newTestModel(t)
+	m.modelSelectMode = true
+	m.availableModels = []string{"alpha", "beta"}
+	m.modelSelectIndex = 1
+
+	model, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = model.(*Model)
+
+	assert.False(t, m.modelSelectMode)
+	assert.Equal(t, "beta", m.modelName)
 }
 
 // ============================================================================
@@ -64,7 +90,7 @@ func TestInit(t *testing.T) {
 
 func TestWindowSizeMsg(t *testing.T) {
 	t.Run("sets ready on first window size", func(t *testing.T) {
-		m := New(nil, nil, nil)
+		m := New(nil, nil, nil, "test-model", "", "")
 		assert.False(t, m.ready)
 
 		m = sendWindowSize(m, 80, 24)
@@ -84,7 +110,7 @@ func TestWindowSizeMsg(t *testing.T) {
 	})
 
 	t.Run("adjusts textarea width", func(t *testing.T) {
-		m := New(nil, nil, nil)
+		m := New(nil, nil, nil, "test-model", "", "")
 
 		m = sendWindowSize(m, 100, 30)
 
@@ -610,7 +636,7 @@ func TestSuggestionMsg(t *testing.T) {
 // ============================================================================
 
 func TestView_NotReady(t *testing.T) {
-	m := New(nil, nil, nil)
+	m := New(nil, nil, nil, "test-model", "", "")
 	m.ready = false
 
 	view := m.View()

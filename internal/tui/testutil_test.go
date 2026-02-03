@@ -33,7 +33,7 @@ var testConfig = struct {
 func newTestModel(t *testing.T) *Model {
 	t.Helper()
 
-	m := New(nil, nil, nil)
+	m := New(nil, nil, nil, "test-model", "", "")
 	m.ready = true
 	m.width = testConfig.Width
 	m.height = testConfig.Height
@@ -48,7 +48,7 @@ func newTestModel(t *testing.T) *Model {
 func newTestModelWithProject(t *testing.T, proj *project.Project) *Model {
 	t.Helper()
 
-	m := New(proj, nil, nil)
+	m := New(proj, nil, nil, "test-model", "", "")
 	m.ready = true
 	m.width = testConfig.Width
 	m.height = testConfig.Height

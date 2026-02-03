@@ -3,8 +3,11 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
+	"time"
 
 	"github.com/azyu/dreamteller/internal/llm"
 	"github.com/azyu/dreamteller/internal/project"
@@ -17,7 +20,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// ViewState represents the current view mode.
 type ViewState int
 
 const (
@@ -28,17 +30,45 @@ const (
 	ViewSuggestion
 )
 
+type ContextMode int
+
+const (
+	ContextEssential ContextMode = iota
+	ContextHybrid
+	ContextFull
+)
+
+func (c ContextMode) String() string {
+	switch c {
+	case ContextEssential:
+		return "Essential"
+	case ContextHybrid:
+		return "Hybrid"
+	case ContextFull:
+		return "Full"
+	default:
+		return "Unknown"
+	}
+}
+
+func (c ContextMode) Next() ContextMode {
+	return (c + 1) % 3
+}
+
 // Message represents a chat message.
 type Message struct {
 	Role    string
 	Content string
 }
 
-// Model is the main TUI model.
 type Model struct {
 	project      *project.Project
 	provider     llm.Provider
 	searchEngine *search.FTSEngine
+	modelName    string
+	providerName string
+	baseURL      string
+	contextMode  ContextMode
 
 	view       ViewState
 	width      int
@@ -60,10 +90,14 @@ type Model struct {
 	suggestionHandler   *SuggestionHandler
 	pendingSuggestion   *SuggestionResult
 	toolCallAccumulator *ToolCallAccumulator
+
+	modelSelectMode  bool
+	availableModels  []string
+	modelSelectIndex int
 }
 
 // New creates a new TUI model.
-func New(proj *project.Project, provider llm.Provider, searchEngine *search.FTSEngine) *Model {
+func New(proj *project.Project, provider llm.Provider, searchEngine *search.FTSEngine, modelName, providerName, baseURL string) *Model {
 	ta := textarea.New()
 	ta.Placeholder = "Enter your message... (/help for commands)"
 	ta.Focus()
@@ -87,6 +121,9 @@ func New(proj *project.Project, provider llm.Provider, searchEngine *search.FTSE
 		project:             proj,
 		provider:            provider,
 		searchEngine:        searchEngine,
+		modelName:           modelName,
+		providerName:        providerName,
+		baseURL:             baseURL,
 		textarea:            ta,
 		spinner:             sp,
 		messages:            []Message{},
@@ -97,12 +134,37 @@ func New(proj *project.Project, provider llm.Provider, searchEngine *search.FTSE
 	}
 }
 
-// Init initializes the model.
 func (m *Model) Init() tea.Cmd {
+	m.loadHistory()
 	return tea.Batch(
 		textarea.Blink,
 		m.spinner.Tick,
 	)
+}
+
+func (m *Model) loadHistory() {
+	if m.project == nil || m.project.DB == nil {
+		return
+	}
+
+	history, err := m.project.DB.GetConversationHistory(50)
+	if err != nil {
+		return
+	}
+
+	for _, record := range history {
+		m.messages = append(m.messages, Message{
+			Role:    record.Role,
+			Content: record.Content,
+		})
+	}
+}
+
+func (m *Model) saveMessage(role, content string) {
+	if m.project == nil || m.project.DB == nil {
+		return
+	}
+	_ = m.project.DB.SaveConversationMessage(role, content)
 }
 
 // Update handles messages.
@@ -165,6 +227,23 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.streaming = false
 		m.inputMode = false
 		m.updateViewport()
+
+	case modelsListMsg:
+		if msg.err != nil {
+			m.err = msg.err
+			m.statusText = ""
+		} else {
+			m.availableModels = msg.models
+			m.modelSelectIndex = 0
+			m.modelSelectMode = true
+			m.inputMode = false
+			m.statusText = "Select a model (↑/↓ to navigate, Enter to select, Esc to cancel)"
+			m.updateViewport()
+		}
+
+	case StreamReadyMsg:
+		m.streamChan = msg.StreamChan
+		return m, m.readNextChunk()
 	}
 
 	// Update textarea if in input mode
@@ -185,6 +264,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // handleKeyMsg handles keyboard input.
 // Returns (model, cmd) where cmd is nil if the key should be passed to textarea.
 func (m *Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Handle model selection mode
+	if m.modelSelectMode {
+		return m.handleModelSelectKey(msg)
+	}
+
 	// Handle suggestion view keys
 	if m.view == ViewSuggestion {
 		return m.handleSuggestionKey(msg)
@@ -213,6 +297,12 @@ func (m *Model) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyEnter:
 		if !m.streaming && m.inputMode {
 			return m.handleSubmit()
+		}
+
+	case tea.KeyTab:
+		if m.inputMode && !m.streaming {
+			m.contextMode = m.contextMode.Next()
+			return m, nil
 		}
 	}
 
@@ -270,6 +360,45 @@ func (m *Model) handleSuggestionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 	}
+	return m, nil
+}
+
+func (m *Model) handleModelSelectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.modelSelectMode = false
+		m.inputMode = true
+		m.statusText = ""
+		m.textarea.Focus()
+		m.updateViewport()
+		return m, nil
+
+	case tea.KeyEnter:
+		if len(m.availableModels) > 0 && m.modelSelectIndex < len(m.availableModels) {
+			m.modelName = m.availableModels[m.modelSelectIndex]
+			m.statusText = fmt.Sprintf("Switched to %s", m.modelName)
+		}
+		m.modelSelectMode = false
+		m.inputMode = true
+		m.textarea.Focus()
+		m.updateViewport()
+		return m, nil
+
+	case tea.KeyUp:
+		if m.modelSelectIndex > 0 {
+			m.modelSelectIndex--
+			m.updateViewport()
+		}
+		return m, nil
+
+	case tea.KeyDown:
+		if m.modelSelectIndex < len(m.availableModels)-1 {
+			m.modelSelectIndex++
+			m.updateViewport()
+		}
+		return m, nil
+	}
+
 	return m, nil
 }
 
@@ -347,6 +476,9 @@ func (m *Model) handleStreamChunk(msg StreamChunkMsg) (tea.Model, tea.Cmd) {
 		if m.toolCallAccumulator.HasCalls() {
 			return m.processToolCalls()
 		}
+		if len(m.messages) > 0 && m.messages[len(m.messages)-1].Role == "assistant" {
+			m.saveMessage("assistant", m.messages[len(m.messages)-1].Content)
+		}
 		m.streamChan = nil
 		return m, func() tea.Msg { return StreamDoneMsg{} }
 	}
@@ -394,6 +526,7 @@ func (m *Model) handleSubmit() (tea.Model, tea.Cmd) {
 		Role:    "user",
 		Content: input,
 	})
+	m.saveMessage("user", input)
 
 	m.textarea.Reset()
 	m.updateViewport()
@@ -413,7 +546,7 @@ func (m *Model) handleSubmit() (tea.Model, tea.Cmd) {
 		return m, func() tea.Msg { return StreamDoneMsg{} }
 	}
 
-	return m, m.startStream(input)
+	return m, tea.Batch(m.spinner.Tick, m.startStream(input))
 }
 
 // handleCommand processes slash commands.
@@ -466,6 +599,9 @@ func (m *Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		m.statusText = "Reindexing..."
 		// TODO: Implement reindex
 
+	case "/models":
+		return m.showModelSelection()
+
 	default:
 		m.err = fmt.Errorf("unknown command: %s", cmd)
 	}
@@ -474,7 +610,6 @@ func (m *Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// startStream starts a streaming response from the LLM provider.
 func (m *Model) startStream(userInput string) tea.Cmd {
 	systemPrompt := m.buildSystemPrompt(userInput)
 	chatMessages := m.buildChatMessages(systemPrompt)
@@ -489,13 +624,15 @@ func (m *Model) startStream(userInput string) tea.Cmd {
 	ctx, cancel := context.WithTimeout(context.Background(), DefaultStreamConfig().Timeout)
 	m.streamController = &StreamController{ctx: ctx, cancel: cancel, config: DefaultStreamConfig()}
 
-	streamChan, err := m.provider.Stream(ctx, req)
-	if err != nil {
-		return func() tea.Msg { return StreamErrorMsg{Err: err} }
-	}
-	m.streamChan = streamChan
+	provider := m.provider
 
-	return m.readNextChunk()
+	return func() tea.Msg {
+		streamChan, err := provider.Stream(ctx, req)
+		if err != nil {
+			return StreamErrorMsg{Err: err}
+		}
+		return StreamReadyMsg{StreamChan: streamChan}
+	}
 }
 
 func (m *Model) readNextChunk() tea.Cmd {
@@ -521,7 +658,6 @@ func (m *Model) readNextChunk() tea.Cmd {
 	}
 }
 
-// buildSystemPrompt builds the system prompt with project context.
 func (m *Model) buildSystemPrompt(userInput string) string {
 	builder := llm.NewSystemPromptBuilder()
 	builder.AddRole(llm.DefaultNovelWritingPrompt())
@@ -531,24 +667,124 @@ func (m *Model) buildSystemPrompt(userInput string) string {
 		builder.AddWritingStyle(m.project.Config.Writing)
 	}
 
-	if m.searchEngine != nil && userInput != "" {
-		results, err := m.searchEngine.Search(userInput, 8)
-		if err == nil && len(results) > 0 {
-			chunks := make([]llm.ContextChunk, 0, len(results))
-			for _, r := range results {
-				chunks = append(chunks, llm.ContextChunk{
-					Content:    r.Content,
-					SourceType: r.SourceType,
-					SourcePath: r.SourcePath,
-					Score:      r.Score,
-				})
+	switch m.contextMode {
+	case ContextEssential:
+		builder.AddContext(m.buildEssentialContext())
+
+	case ContextHybrid:
+		builder.AddContext(m.buildEssentialContext())
+		if m.searchEngine != nil && userInput != "" {
+			if searchContext := m.buildSearchContext(userInput); searchContext != "" {
+				builder.AddContext("\n### Additional Search Results\n" + searchContext)
 			}
-			contextPrompt := (&llm.ContextManager{}).BuildContextPrompt(chunks)
-			builder.AddContext(contextPrompt)
 		}
+
+	case ContextFull:
+		builder.AddContext(m.buildFullContext())
 	}
 
 	return builder.Build()
+}
+
+func (m *Model) buildEssentialContext() string {
+	if m.project == nil {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("\n## Story Context\n\n")
+
+	if characters, err := m.project.LoadCharacters(); err == nil && len(characters) > 0 {
+		sb.WriteString("### Characters\n")
+		for _, c := range characters {
+			sb.WriteString(fmt.Sprintf("- **%s**: %s\n", c.Name, truncateForEssential(c.Description, 200)))
+		}
+		sb.WriteString("\n")
+	}
+
+	if settings, err := m.project.LoadSettings(); err == nil && len(settings) > 0 {
+		sb.WriteString("### Settings\n")
+		for _, s := range settings {
+			sb.WriteString(fmt.Sprintf("- **%s**: %s\n", s.Name, truncateForEssential(s.Description, 200)))
+		}
+		sb.WriteString("\n")
+	}
+
+	if plots, err := m.project.LoadPlots(); err == nil && len(plots) > 0 {
+		sb.WriteString("### Plot\n")
+		for _, p := range plots {
+			sb.WriteString(fmt.Sprintf("- **%s**: %s\n", p.Title, truncateForEssential(p.Description, 200)))
+		}
+		sb.WriteString("\n")
+	}
+
+	return sb.String()
+}
+
+func (m *Model) buildFullContext() string {
+	if m.project == nil {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("\n## Complete Story Context\n\n")
+
+	if characters, err := m.project.LoadCharacters(); err == nil && len(characters) > 0 {
+		sb.WriteString("### Characters\n\n")
+		for _, c := range characters {
+			sb.WriteString(fmt.Sprintf("#### %s\n%s\n\n", c.Name, c.Description))
+		}
+	}
+
+	if settings, err := m.project.LoadSettings(); err == nil && len(settings) > 0 {
+		sb.WriteString("### Settings\n\n")
+		for _, s := range settings {
+			sb.WriteString(fmt.Sprintf("#### %s\n%s\n\n", s.Name, s.Description))
+		}
+	}
+
+	if plots, err := m.project.LoadPlots(); err == nil && len(plots) > 0 {
+		sb.WriteString("### Plot\n\n")
+		for _, p := range plots {
+			sb.WriteString(fmt.Sprintf("#### %s\n%s\n\n", p.Title, p.Description))
+		}
+	}
+
+	return sb.String()
+}
+
+func (m *Model) buildSearchContext(userInput string) string {
+	if m.searchEngine == nil || userInput == "" {
+		return ""
+	}
+
+	results, err := m.searchEngine.Search(userInput, 8)
+	if err != nil || len(results) == 0 {
+		return ""
+	}
+
+	chunks := make([]llm.ContextChunk, 0, len(results))
+	for _, r := range results {
+		chunks = append(chunks, llm.ContextChunk{
+			Content:    r.Content,
+			SourceType: r.SourceType,
+			SourcePath: r.SourcePath,
+			Score:      r.Score,
+		})
+	}
+	return (&llm.ContextManager{}).BuildContextPrompt(chunks)
+}
+
+func truncateForEssential(s string, maxLen int) string {
+	s = strings.TrimSpace(s)
+	lines := strings.Split(s, "\n")
+	if len(lines) > 0 {
+		s = lines[0]
+	}
+	if len(s) > maxLen {
+		return s[:maxLen-3] + "..."
+	}
+	return s
 }
 
 // buildChatMessages converts internal messages to LLM format.
@@ -583,6 +819,12 @@ func (m *Model) cancelStream() {
 // updateViewport updates the viewport content.
 func (m *Model) updateViewport() {
 	var content string
+
+	if m.modelSelectMode {
+		content = m.renderModelSelect()
+		m.viewport.SetContent(content)
+		return
+	}
 
 	switch m.view {
 	case ViewChat:
@@ -648,6 +890,35 @@ Keyboard Shortcuts:
 Press /back or Esc to return to chat.
 `
 	return styles.InfoText.Render(help)
+}
+
+func (m *Model) renderModelSelect() string {
+	var sb strings.Builder
+	sb.WriteString(styles.Title.Render("Select Model"))
+	sb.WriteString("\n\n")
+
+	if len(m.availableModels) == 0 {
+		sb.WriteString(styles.MutedText.Render("No models available"))
+		return sb.String()
+	}
+
+	for i, model := range m.availableModels {
+		prefix := "  "
+		style := styles.MutedText
+		if i == m.modelSelectIndex {
+			prefix = "> "
+			style = styles.SelectedItem
+		}
+		if model == m.modelName {
+			sb.WriteString(style.Render(fmt.Sprintf("%s%s (current)\n", prefix, model)))
+		} else {
+			sb.WriteString(style.Render(fmt.Sprintf("%s%s\n", prefix, model)))
+		}
+	}
+
+	sb.WriteString("\n")
+	sb.WriteString(styles.HelpDesc.Render("↑/↓ Navigate • Enter Select • Esc Cancel"))
+	return sb.String()
 }
 
 // renderContext renders the context management view.
@@ -809,20 +1080,30 @@ func (m *Model) View() string {
 		m.statusText = ""
 	}
 
-	// Input area (only in chat view)
 	if m.view == ViewChat {
+		sb.WriteString(styles.MutedText.Render(strings.Repeat("─", m.width)))
+		sb.WriteString("\n")
 		sb.WriteString(m.textarea.View())
+		sb.WriteString("\n")
+		sb.WriteString(styles.MutedText.Render(strings.Repeat("─", m.width)))
 	}
 
-	// Help hint
+	modelInfo := styles.StatusBar.Render("🤖 " + m.modelName)
+	contextInfo := styles.HelpKey.Render("[Tab]") + styles.HelpDesc.Render(" "+m.contextMode.String())
 	helpHint := styles.HelpKey.Render("/help") + styles.HelpDesc.Render(" for commands")
+
+	leftPart := modelInfo + "  " + contextInfo
+	gap := m.width - lipgloss.Width(leftPart) - lipgloss.Width(helpHint)
+	if gap < 0 {
+		gap = 0
+	}
+	statusLine := leftPart + strings.Repeat(" ", gap) + helpHint
 	sb.WriteString("\n")
-	sb.WriteString(lipgloss.PlaceHorizontal(m.width, lipgloss.Right, helpHint))
+	sb.WriteString(statusLine)
 
 	return sb.String()
 }
 
-// Message types for streaming
 type StreamChunkMsg struct {
 	Content  string
 	ToolCall *llm.ToolCallDelta
@@ -835,6 +1116,67 @@ type StreamErrorMsg struct {
 	Err error
 }
 
+type StreamReadyMsg struct {
+	StreamChan <-chan llm.StreamChunk
+}
+
 type errMsg struct {
 	err error
+}
+
+func (m *Model) showModelSelection() (tea.Model, tea.Cmd) {
+	m.statusText = "Fetching models..."
+	m.textarea.Reset()
+
+	return m, m.fetchModelsCmd()
+}
+
+type modelsListMsg struct {
+	models []string
+	err    error
+}
+
+func (m *Model) fetchModelsCmd() tea.Cmd {
+	return func() tea.Msg {
+		if m.providerName != "local" {
+			return modelsListMsg{err: fmt.Errorf("/models only supported for local provider")}
+		}
+
+		models, err := fetchLocalModelsForTUI(m.baseURL)
+		return modelsListMsg{models: models, err: err}
+	}
+}
+
+func fetchLocalModelsForTUI(baseURL string) ([]string, error) {
+	if baseURL == "" {
+		return nil, fmt.Errorf("no base URL configured")
+	}
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(strings.TrimSuffix(baseURL, "/") + "/api/tags")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("server returned %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Models []struct {
+			Name string `json:"name"`
+		} `json:"models"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	models := make([]string, len(result.Models))
+	for i, m := range result.Models {
+		models[i] = m.Name
+	}
+
+	return models, nil
 }
