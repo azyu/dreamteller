@@ -68,6 +68,7 @@ type ProviderConfig struct {
 	APIKey       string `yaml:"api_key"`
 	DefaultModel string `yaml:"default_model"`
 	BaseURL      string `yaml:"base_url,omitempty"`
+	Protocol     string `yaml:"protocol,omitempty"`
 }
 
 // DefaultsConfig specifies default settings.

@@ -103,6 +103,13 @@ func (m *Manager) Create(name string, config *types.ProjectConfig) (*Project, er
 	return m.Open(name)
 }
 
+// Exists checks if a project with the given name already exists.
+func (m *Manager) Exists(name string) bool {
+	projectPath := filepath.Join(m.projectsDir, name)
+	_, err := os.Stat(projectPath)
+	return err == nil
+}
+
 // Open opens an existing project.
 func (m *Manager) Open(name string) (*Project, error) {
 	projectPath := filepath.Join(m.projectsDir, name)

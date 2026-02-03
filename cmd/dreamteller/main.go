@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/azyu/dreamteller/internal/app"
 	"github.com/azyu/dreamteller/internal/llm"
@@ -59,6 +61,10 @@ func runNewCmd(cmd *cobra.Command, args []string) error {
 	}
 	defer application.Close()
 
+	if application.ProjectManager.Exists(name) {
+		return fmt.Errorf("project '%s' already exists", name)
+	}
+
 	// Handle --from-prompt flag
 	if fromPrompt != "" {
 		promptContent, err := readPromptFile(fromPrompt)
@@ -90,18 +96,168 @@ const (
 	SetupModeTemplate SetupMode = "template"
 )
 
+type Language string
+
+const (
+	LangEnglish  Language = "en"
+	LangKorean   Language = "ko"
+	LangJapanese Language = "ja"
+)
+
+type i18nStrings struct {
+	SetupTitle       string
+	SetupWizard      string
+	SetupPrompt      string
+	SetupTemplate    string
+	SelectGenre      string
+	WritingStyle     string
+	StylePlaceholder string
+	PointOfView      string
+	Tense            string
+	Genres           map[string]string
+	POVs             map[string]string
+	Tenses           map[string]string
+	CreatedProject   string
+	RunToStart       string
+}
+
+var translations = map[Language]i18nStrings{
+	LangEnglish: {
+		SetupTitle:       "How would you like to set up your project?",
+		SetupWizard:      "Wizard - Guided step-by-step setup",
+		SetupPrompt:      "Prompt - Describe your story and auto-create",
+		SetupTemplate:    "Template - Start from a preset (coming soon)",
+		SelectGenre:      "Select your genre",
+		WritingStyle:     "Describe your writing style",
+		StylePlaceholder: "e.g., descriptive, immersive, fast-paced",
+		PointOfView:      "Point of View",
+		Tense:            "Tense",
+		Genres: map[string]string{
+			"fantasy":    "Fantasy",
+			"scifi":      "Science Fiction",
+			"mystery":    "Mystery",
+			"romance":    "Romance",
+			"thriller":   "Thriller",
+			"horror":     "Horror",
+			"historical": "Historical Fiction",
+			"literary":   "Literary Fiction",
+			"other":      "Other",
+		},
+		POVs: map[string]string{
+			"first-person":            "First Person",
+			"third-person-limited":    "Third Person Limited",
+			"third-person-omniscient": "Third Person Omniscient",
+			"second-person":           "Second Person",
+		},
+		Tenses: map[string]string{
+			"past":    "Past Tense",
+			"present": "Present Tense",
+		},
+		CreatedProject: "Created project '%s' at %s",
+		RunToStart:     "Run 'dreamteller open %s' to start writing!",
+	},
+	LangKorean: {
+		SetupTitle:       "프로젝트를 어떻게 설정하시겠습니까?",
+		SetupWizard:      "마법사 - 단계별 안내 설정",
+		SetupPrompt:      "프롬프트 - 스토리 설명으로 자동 생성",
+		SetupTemplate:    "템플릿 - 프리셋으로 시작 (준비 중)",
+		SelectGenre:      "장르를 선택하세요",
+		WritingStyle:     "작문 스타일을 설명하세요",
+		StylePlaceholder: "예: 묘사적, 몰입감 있는, 빠른 전개",
+		PointOfView:      "시점",
+		Tense:            "시제",
+		Genres: map[string]string{
+			"fantasy":    "판타지",
+			"scifi":      "SF (과학 소설)",
+			"mystery":    "미스터리",
+			"romance":    "로맨스",
+			"thriller":   "스릴러",
+			"horror":     "호러",
+			"historical": "역사 소설",
+			"literary":   "순수 문학",
+			"other":      "기타",
+		},
+		POVs: map[string]string{
+			"first-person":            "1인칭",
+			"third-person-limited":    "3인칭 제한",
+			"third-person-omniscient": "3인칭 전지",
+			"second-person":           "2인칭",
+		},
+		Tenses: map[string]string{
+			"past":    "과거 시제",
+			"present": "현재 시제",
+		},
+		CreatedProject: "'%s' 프로젝트가 %s에 생성되었습니다",
+		RunToStart:     "'dreamteller open %s' 명령으로 시작하세요!",
+	},
+	LangJapanese: {
+		SetupTitle:       "プロジェクトの設定方法を選んでください",
+		SetupWizard:      "ウィザード - ステップバイステップのガイド設定",
+		SetupPrompt:      "プロンプト - ストーリーを説明して自動作成",
+		SetupTemplate:    "テンプレート - プリセットから開始（準備中）",
+		SelectGenre:      "ジャンルを選択してください",
+		WritingStyle:     "文体を説明してください",
+		StylePlaceholder: "例：描写的、没入感のある、テンポが速い",
+		PointOfView:      "視点",
+		Tense:            "時制",
+		Genres: map[string]string{
+			"fantasy":    "ファンタジー",
+			"scifi":      "SF（サイエンスフィクション）",
+			"mystery":    "ミステリー",
+			"romance":    "ロマンス",
+			"thriller":   "スリラー",
+			"horror":     "ホラー",
+			"historical": "歴史小説",
+			"literary":   "純文学",
+			"other":      "その他",
+		},
+		POVs: map[string]string{
+			"first-person":            "一人称",
+			"third-person-limited":    "三人称限定",
+			"third-person-omniscient": "三人称全知",
+			"second-person":           "二人称",
+		},
+		Tenses: map[string]string{
+			"past":    "過去形",
+			"present": "現在形",
+		},
+		CreatedProject: "プロジェクト '%s' を %s に作成しました",
+		RunToStart:     "'dreamteller open %s' で開始してください！",
+	},
+}
+
 // runInteractiveSetup shows the setup mode selection UI.
 func runInteractiveSetup(application *app.App, name string) error {
+	var lang Language
+
+	langForm := huh.NewForm(
+		huh.NewGroup(
+			huh.NewSelect[Language]().
+				Title("Select your language / 언어 선택 / 言語を選択").
+				Options(
+					huh.NewOption("English", LangEnglish),
+					huh.NewOption("한국어", LangKorean),
+					huh.NewOption("日本語", LangJapanese),
+				).
+				Value(&lang),
+		),
+	)
+
+	if err := langForm.Run(); err != nil {
+		return fmt.Errorf("language selection failed: %w", err)
+	}
+
+	t := translations[lang]
 	var mode SetupMode
 
 	form := huh.NewForm(
 		huh.NewGroup(
 			huh.NewSelect[SetupMode]().
-				Title("How would you like to set up your project?").
+				Title(t.SetupTitle).
 				Options(
-					huh.NewOption("Wizard - Guided step-by-step setup", SetupModeWizard),
-					huh.NewOption("Prompt - Describe your story and auto-create", SetupModePrompt),
-					huh.NewOption("Template - Start from a preset (coming soon)", SetupModeTemplate),
+					huh.NewOption(t.SetupWizard, SetupModeWizard),
+					huh.NewOption(t.SetupPrompt, SetupModePrompt),
+					huh.NewOption(t.SetupTemplate, SetupModeTemplate),
 				).
 				Value(&mode),
 		),
@@ -113,7 +269,7 @@ func runInteractiveSetup(application *app.App, name string) error {
 
 	switch mode {
 	case SetupModeWizard:
-		return runWizardSetup(application, name)
+		return runWizardSetup(application, name, lang)
 	case SetupModePrompt:
 		return runPromptSetup(application, name)
 	case SetupModeTemplate:
@@ -126,58 +282,53 @@ func runInteractiveSetup(application *app.App, name string) error {
 }
 
 // runWizardSetup runs the guided step-by-step wizard.
-func runWizardSetup(application *app.App, name string) error {
+func runWizardSetup(application *app.App, name string, lang Language) error {
+	t := translations[lang]
 	var genre string
 	var writingStyle string
 	var pov string
 	var tense string
 
-	genres := []huh.Option[string]{
-		huh.NewOption("Fantasy", "fantasy"),
-		huh.NewOption("Science Fiction", "scifi"),
-		huh.NewOption("Mystery", "mystery"),
-		huh.NewOption("Romance", "romance"),
-		huh.NewOption("Thriller", "thriller"),
-		huh.NewOption("Horror", "horror"),
-		huh.NewOption("Historical Fiction", "historical"),
-		huh.NewOption("Literary Fiction", "literary"),
-		huh.NewOption("Other", "other"),
+	genreKeys := []string{"fantasy", "scifi", "mystery", "romance", "thriller", "horror", "historical", "literary", "other"}
+	genres := make([]huh.Option[string], len(genreKeys))
+	for i, key := range genreKeys {
+		genres[i] = huh.NewOption(t.Genres[key], key)
 	}
 
-	povOptions := []huh.Option[string]{
-		huh.NewOption("First Person", "first-person"),
-		huh.NewOption("Third Person Limited", "third-person-limited"),
-		huh.NewOption("Third Person Omniscient", "third-person-omniscient"),
-		huh.NewOption("Second Person", "second-person"),
+	povKeys := []string{"first-person", "third-person-limited", "third-person-omniscient", "second-person"}
+	povOptions := make([]huh.Option[string], len(povKeys))
+	for i, key := range povKeys {
+		povOptions[i] = huh.NewOption(t.POVs[key], key)
 	}
 
-	tenseOptions := []huh.Option[string]{
-		huh.NewOption("Past Tense", "past"),
-		huh.NewOption("Present Tense", "present"),
+	tenseKeys := []string{"past", "present"}
+	tenseOptions := make([]huh.Option[string], len(tenseKeys))
+	for i, key := range tenseKeys {
+		tenseOptions[i] = huh.NewOption(t.Tenses[key], key)
 	}
 
 	form := huh.NewForm(
 		huh.NewGroup(
 			huh.NewSelect[string]().
-				Title("Select your genre").
+				Title(t.SelectGenre).
 				Options(genres...).
 				Value(&genre),
 		),
 		huh.NewGroup(
 			huh.NewInput().
-				Title("Describe your writing style").
-				Placeholder("e.g., descriptive, immersive, fast-paced").
+				Title(t.WritingStyle).
+				Placeholder(t.StylePlaceholder).
 				Value(&writingStyle),
 		),
 		huh.NewGroup(
 			huh.NewSelect[string]().
-				Title("Point of View").
+				Title(t.PointOfView).
 				Options(povOptions...).
 				Value(&pov),
 		),
 		huh.NewGroup(
 			huh.NewSelect[string]().
-				Title("Tense").
+				Title(t.Tense).
 				Options(tenseOptions...).
 				Value(&tense),
 		),
@@ -187,7 +338,6 @@ func runWizardSetup(application *app.App, name string) error {
 		return fmt.Errorf("wizard setup failed: %w", err)
 	}
 
-	// Create project with wizard config
 	config := types.DefaultProjectConfig(name, genre)
 	config.Writing.Style = writingStyle
 	config.Writing.POV = pov
@@ -199,11 +349,11 @@ func runWizardSetup(application *app.App, name string) error {
 	}
 	application.CurrentProject = proj
 
-	fmt.Printf("\nCreated project '%s' at %s\n", name, proj.Path())
-	fmt.Printf("Genre: %s\n", genre)
+	fmt.Printf("\n"+t.CreatedProject+"\n", name, proj.Path())
+	fmt.Printf("Genre: %s\n", t.Genres[genre])
 	fmt.Printf("Style: %s\n", writingStyle)
-	fmt.Printf("POV: %s, Tense: %s\n", pov, tense)
-	fmt.Println("\nRun 'dreamteller open " + name + "' to start writing!")
+	fmt.Printf("POV: %s, Tense: %s\n", t.POVs[pov], t.Tenses[tense])
+	fmt.Printf("\n"+t.RunToStart+"\n", name)
 
 	return nil
 }
@@ -268,17 +418,14 @@ func readFromStdin() (string, error) {
 	return strings.TrimSpace(builder.String()), nil
 }
 
-// createProjectFromPrompt creates a project using AI to parse the prompt.
-func createProjectFromPrompt(application *app.App, name, promptContent string) error {
-	fmt.Println("Analyzing your story description...")
+var errNoProvider = fmt.Errorf("no LLM provider configured")
 
-	// Load global config to get provider settings
+func checkLLMProvider(application *app.App) (*types.ProviderConfig, string, error) {
 	globalConfig, err := application.Config.LoadGlobalConfig()
 	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
+		return nil, "", fmt.Errorf("failed to load config: %w", err)
 	}
 
-	// Get the default provider
 	providerName := globalConfig.Defaults.Provider
 	if providerName == "" {
 		providerName = "openai"
@@ -286,14 +433,28 @@ func createProjectFromPrompt(application *app.App, name, promptContent string) e
 
 	providerConfig, err := application.Config.GetProviderConfig(providerName)
 	if err != nil {
-		return fmt.Errorf("failed to get provider config: %w", err)
+		fmt.Println("\n⚠ No LLM provider configured.")
+		fmt.Println("Run 'dreamteller auth' to set up a provider.")
+		return nil, "", errNoProvider
 	}
 
-	if providerConfig.APIKey == "" {
-		return fmt.Errorf("no API key configured for provider %s. Configure it in ~/.config/dreamteller/config.yaml", providerName)
+	if providerName != "local" && providerConfig.APIKey == "" {
+		fmt.Printf("\n⚠ No API key configured for %s.\n", providerName)
+		fmt.Println("Run 'dreamteller auth' to set up a provider.")
+		return nil, "", errNoProvider
 	}
 
-	// Initialize LLM provider
+	return providerConfig, providerName, nil
+}
+
+func createProjectFromPrompt(application *app.App, name, promptContent string) error {
+	fmt.Println("Analyzing your story description...")
+
+	providerConfig, providerName, err := checkLLMProvider(application)
+	if err != nil {
+		return err
+	}
+
 	ctx := context.Background()
 	provider, err := initLLMProvider(ctx, providerName, providerConfig)
 	if err != nil {
@@ -301,7 +462,6 @@ func createProjectFromPrompt(application *app.App, name, promptContent string) e
 	}
 	defer provider.Close()
 
-	// Parse the prompt using AI
 	parseResult, err := parsePromptWithAI(ctx, provider, promptContent)
 	if err != nil {
 		return fmt.Errorf("failed to parse prompt: %w", err)
@@ -681,18 +841,565 @@ var configCmd = &cobra.Command{
 	},
 }
 
+var deleteCmd = &cobra.Command{
+	Use:   "delete <name>",
+	Short: "Delete a novel project",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		name := args[0]
+		force, _ := cmd.Flags().GetBool("force")
+
+		application, err := app.New()
+		if err != nil {
+			return fmt.Errorf("failed to initialize app: %w", err)
+		}
+
+		if !application.ProjectManager.Exists(name) {
+			return fmt.Errorf("project '%s' not found", name)
+		}
+
+		if !force {
+			var confirm string
+			fmt.Printf("This will permanently delete project '%s' and all its files.\n", name)
+			fmt.Printf("Type the project name to confirm: ")
+			fmt.Scanln(&confirm)
+
+			if confirm != name {
+				fmt.Println("Deletion cancelled.")
+				return nil
+			}
+		}
+
+		if err := application.ProjectManager.Delete(name); err != nil {
+			return fmt.Errorf("failed to delete project: %w", err)
+		}
+
+		fmt.Printf("Project '%s' deleted.\n", name)
+		return nil
+	},
+}
+
+var authCmd = &cobra.Command{
+	Use:   "auth",
+	Short: "Configure LLM provider authentication",
+	RunE:  runAuthCmd,
+}
+
+func runAuthCmd(cmd *cobra.Command, args []string) error {
+	listFlag, _ := cmd.Flags().GetBool("list")
+	removeFlag, _ := cmd.Flags().GetString("remove")
+	providerFlag, _ := cmd.Flags().GetString("provider")
+
+	application, err := app.New()
+	if err != nil {
+		return fmt.Errorf("failed to initialize app: %w", err)
+	}
+
+	if listFlag {
+		return listProviders(application)
+	}
+
+	if removeFlag != "" {
+		return removeProvider(application, removeFlag)
+	}
+
+	if providerFlag != "" {
+		return configureProvider(application, providerFlag)
+	}
+
+	return interactiveAuth(application)
+}
+
+func listProviders(application *app.App) error {
+	config, err := application.Config.LoadGlobalConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	fmt.Println("Configured providers:")
+	fmt.Println()
+
+	providers := []struct {
+		name  string
+		label string
+	}{
+		{"openai", "OpenAI"},
+		{"gemini", "Google Gemini"},
+		{"local", "Local (Ollama/LM Studio)"},
+	}
+
+	hasAny := false
+	for _, p := range providers {
+		providerConfig, exists := config.Providers[p.name]
+		if !exists || (providerConfig.APIKey == "" && providerConfig.BaseURL == "") {
+			continue
+		}
+
+		hasAny = true
+		isDefault := config.Defaults.Provider == p.name
+		defaultMark := ""
+		if isDefault {
+			defaultMark = " (default)"
+		}
+
+		fmt.Printf("  %s%s\n", p.label, defaultMark)
+
+		if providerConfig.APIKey != "" {
+			masked := maskAPIKey(providerConfig.APIKey)
+			fmt.Printf("    API Key: %s\n", masked)
+		}
+		if providerConfig.DefaultModel != "" {
+			fmt.Printf("    Model: %s\n", providerConfig.DefaultModel)
+		}
+		if providerConfig.BaseURL != "" {
+			fmt.Printf("    Base URL: %s\n", providerConfig.BaseURL)
+		}
+		fmt.Println()
+	}
+
+	if !hasAny {
+		fmt.Println("  No providers configured.")
+		fmt.Println()
+		fmt.Println("Run 'dreamteller auth' to configure a provider.")
+	}
+
+	return nil
+}
+
+func maskAPIKey(key string) string {
+	if len(key) <= 8 {
+		return "****"
+	}
+	return key[:4] + "..." + key[len(key)-4:]
+}
+
+func removeProvider(application *app.App, providerName string) error {
+	config, err := application.Config.LoadGlobalConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	if _, exists := config.Providers[providerName]; !exists {
+		return fmt.Errorf("provider '%s' is not configured", providerName)
+	}
+
+	delete(config.Providers, providerName)
+
+	if config.Defaults.Provider == providerName {
+		config.Defaults.Provider = ""
+		for name := range config.Providers {
+			config.Defaults.Provider = name
+			break
+		}
+	}
+
+	if err := application.Config.SaveGlobalConfig(config); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+
+	fmt.Printf("Provider '%s' removed.\n", providerName)
+	return nil
+}
+
+func configureProvider(application *app.App, providerName string) error {
+	switch providerName {
+	case "openai", "gemini", "local":
+		return setupProvider(application, providerName)
+	default:
+		return fmt.Errorf("unknown provider: %s (supported: openai, gemini, local)", providerName)
+	}
+}
+
+func interactiveAuth(application *app.App) error {
+	var providerName string
+
+	form := huh.NewForm(
+		huh.NewGroup(
+			huh.NewSelect[string]().
+				Title("Select provider to configure").
+				Options(
+					huh.NewOption("OpenAI", "openai"),
+					huh.NewOption("Google Gemini", "gemini"),
+					huh.NewOption("Local (Ollama/LM Studio)", "local"),
+				).
+				Value(&providerName),
+		),
+	)
+
+	if err := form.Run(); err != nil {
+		return fmt.Errorf("provider selection failed: %w", err)
+	}
+
+	return setupProvider(application, providerName)
+}
+
+func setupProvider(application *app.App, providerName string) error {
+	config, err := application.Config.LoadGlobalConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	if config.Providers == nil {
+		config.Providers = make(map[string]*types.ProviderConfig)
+	}
+
+	providerConfig := config.Providers[providerName]
+	if providerConfig == nil {
+		providerConfig = &types.ProviderConfig{}
+	}
+
+	switch providerName {
+	case "openai":
+		if err := setupOpenAI(providerConfig); err != nil {
+			return err
+		}
+	case "gemini":
+		if err := setupGemini(providerConfig); err != nil {
+			return err
+		}
+	case "local":
+		if err := setupLocal(providerConfig); err != nil {
+			return err
+		}
+	}
+
+	config.Providers[providerName] = providerConfig
+
+	var setDefault bool
+	defaultForm := huh.NewForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Title("Set as default provider?").
+				Value(&setDefault),
+		),
+	)
+
+	if err := defaultForm.Run(); err != nil {
+		return fmt.Errorf("default selection failed: %w", err)
+	}
+
+	if setDefault {
+		config.Defaults.Provider = providerName
+	}
+
+	if err := application.Config.SaveGlobalConfig(config); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+
+	fmt.Printf("\n✓ %s configured successfully\n", providerName)
+	return nil
+}
+
+func setupOpenAI(config *types.ProviderConfig) error {
+	var apiKey, model string
+
+	currentKey := ""
+	if config.APIKey != "" {
+		currentKey = " (current: " + maskAPIKey(config.APIKey) + ")"
+	}
+
+	form := huh.NewForm(
+		huh.NewGroup(
+			huh.NewInput().
+				Title("OpenAI API Key"+currentKey).
+				Placeholder("sk-...").
+				Value(&apiKey),
+			huh.NewSelect[string]().
+				Title("Default model").
+				Options(
+					huh.NewOption("GPT-4o (recommended)", "gpt-4o"),
+					huh.NewOption("GPT-4o Mini", "gpt-4o-mini"),
+					huh.NewOption("GPT-4 Turbo", "gpt-4-turbo"),
+					huh.NewOption("GPT-4", "gpt-4"),
+					huh.NewOption("GPT-3.5 Turbo", "gpt-3.5-turbo"),
+				).
+				Value(&model),
+		),
+	)
+
+	if err := form.Run(); err != nil {
+		return fmt.Errorf("OpenAI setup failed: %w", err)
+	}
+
+	if apiKey != "" {
+		config.APIKey = apiKey
+	}
+	if model != "" {
+		config.DefaultModel = model
+	}
+
+	return nil
+}
+
+func setupGemini(config *types.ProviderConfig) error {
+	var apiKey, model string
+
+	currentKey := ""
+	if config.APIKey != "" {
+		currentKey = " (current: " + maskAPIKey(config.APIKey) + ")"
+	}
+
+	form := huh.NewForm(
+		huh.NewGroup(
+			huh.NewInput().
+				Title("Gemini API Key"+currentKey).
+				Placeholder("Get from ai.google.dev").
+				Value(&apiKey),
+			huh.NewSelect[string]().
+				Title("Default model").
+				Options(
+					huh.NewOption("Gemini 2.5 Flash (recommended)", "gemini-2.5-flash"),
+					huh.NewOption("Gemini 2.5 Pro", "gemini-2.5-pro"),
+					huh.NewOption("Gemini 2.0 Flash", "gemini-2.0-flash"),
+				).
+				Value(&model),
+		),
+	)
+
+	if err := form.Run(); err != nil {
+		return fmt.Errorf("Gemini setup failed: %w", err)
+	}
+
+	if apiKey != "" {
+		config.APIKey = apiKey
+	}
+	if model != "" {
+		config.DefaultModel = model
+	}
+
+	return nil
+}
+
+func setupLocal(config *types.ProviderConfig) error {
+	var baseURL string
+	var protocol string
+
+	if config.BaseURL == "" {
+		config.BaseURL = "http://localhost:11434"
+	}
+	if config.Protocol == "" {
+		config.Protocol = "openai"
+	}
+
+	protocols := []huh.Option[string]{
+		huh.NewOption("OpenAI Compatible", "openai"),
+		huh.NewOption("Anthropic Compatible", "anthropic"),
+		huh.NewOption("Gemini Compatible", "gemini"),
+		huh.NewOption("Ollama", "ollama"),
+	}
+
+	setupForm := huh.NewForm(
+		huh.NewGroup(
+			huh.NewSelect[string]().
+				Title("Protocol").
+				Options(protocols...).
+				Value(&protocol),
+			huh.NewInput().
+				Title("Base URL").
+				Placeholder("http://localhost:11434").
+				Value(&baseURL),
+		),
+	)
+
+	if err := setupForm.Run(); err != nil {
+		return fmt.Errorf("Local setup failed: %w", err)
+	}
+
+	if protocol != "" {
+		config.Protocol = protocol
+	}
+	if baseURL != "" {
+		config.BaseURL = baseURL
+	}
+
+	models, err := fetchLocalModels(config.BaseURL, config.Protocol)
+	if err != nil {
+		fmt.Printf("\n⚠ Could not fetch models from %s: %v\n", config.BaseURL, err)
+		fmt.Println("Please enter model name manually.")
+
+		var model string
+		manualForm := huh.NewForm(
+			huh.NewGroup(
+				huh.NewInput().
+					Title("Model name").
+					Placeholder("llama3, mistral, etc.").
+					Validate(func(s string) error {
+						if strings.TrimSpace(s) == "" {
+							return fmt.Errorf("model name is required")
+						}
+						return nil
+					}).
+					Value(&model),
+			),
+		)
+		if err := manualForm.Run(); err != nil {
+			return fmt.Errorf("model input failed: %w", err)
+		}
+		config.DefaultModel = model
+		return nil
+	}
+
+	if len(models) == 0 {
+		fmt.Println("\n⚠ No models found. Please pull a model first:")
+		fmt.Println("  ollama pull llama3.2")
+		return fmt.Errorf("no models available")
+	}
+
+	var selectedModel string
+	options := make([]huh.Option[string], len(models))
+	for i, m := range models {
+		options[i] = huh.NewOption(m.Display, m.Name)
+	}
+
+	modelForm := huh.NewForm(
+		huh.NewGroup(
+			huh.NewSelect[string]().
+				Title("Select model").
+				Options(options...).
+				Value(&selectedModel),
+		),
+	)
+
+	if err := modelForm.Run(); err != nil {
+		return fmt.Errorf("model selection failed: %w", err)
+	}
+
+	config.DefaultModel = selectedModel
+	return nil
+}
+
+type modelInfo struct {
+	Name    string
+	Display string
+}
+
+func fetchLocalModels(baseURL, protocol string) ([]modelInfo, error) {
+	baseURL = strings.TrimSuffix(baseURL, "/")
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	endpointMap := map[string]struct {
+		path  string
+		parse func([]byte) ([]modelInfo, error)
+	}{
+		"ollama":    {"/api/tags", parseOllamaModels},
+		"openai":    {"/v1/models", parseOpenAIModels},
+		"anthropic": {"/v1/models", parseOpenAIModels},
+		"gemini":    {"/v1beta/models", parseGeminiModels},
+	}
+
+	ep, ok := endpointMap[protocol]
+	if !ok {
+		return nil, fmt.Errorf("unknown protocol: %s", protocol)
+	}
+
+	resp, err := client.Get(baseURL + ep.path)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%s returned %d", ep.path, resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	return ep.parse(body)
+}
+
+func parseOllamaModels(body []byte) ([]modelInfo, error) {
+	var result struct {
+		Models []struct {
+			Name    string `json:"name"`
+			Details struct {
+				ParameterSize     string `json:"parameter_size"`
+				QuantizationLevel string `json:"quantization_level"`
+			} `json:"details"`
+		} `json:"models"`
+	}
+
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
+	}
+
+	models := make([]modelInfo, len(result.Models))
+	for i, m := range result.Models {
+		display := m.Name
+		if m.Details.ParameterSize != "" {
+			display = fmt.Sprintf("%s (%s", m.Name, m.Details.ParameterSize)
+			if m.Details.QuantizationLevel != "" {
+				display += ", " + m.Details.QuantizationLevel
+			}
+			display += ")"
+		}
+		models[i] = modelInfo{Name: m.Name, Display: display}
+	}
+	return models, nil
+}
+
+func parseOpenAIModels(body []byte) ([]modelInfo, error) {
+	var result struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
+	}
+
+	models := make([]modelInfo, len(result.Data))
+	for i, m := range result.Data {
+		models[i] = modelInfo{Name: m.ID, Display: m.ID}
+	}
+	return models, nil
+}
+
+func parseGeminiModels(body []byte) ([]modelInfo, error) {
+	var result struct {
+		Models []struct {
+			Name        string `json:"name"`
+			DisplayName string `json:"displayName"`
+		} `json:"models"`
+	}
+
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
+	}
+
+	models := make([]modelInfo, len(result.Models))
+	for i, m := range result.Models {
+		name := strings.TrimPrefix(m.Name, "models/")
+		display := m.DisplayName
+		if display == "" {
+			display = name
+		}
+		models[i] = modelInfo{Name: name, Display: display}
+	}
+	return models, nil
+}
+
 func init() {
-	// Add flags to newCmd
 	newCmd.Flags().String("from-prompt", "", "Path to prompt file for one-shot setup (use '-' for stdin)")
 	newCmd.Flags().String("genre", "", "Genre for quick project creation without wizard")
 
-	// Add subcommands
+	deleteCmd.Flags().BoolP("force", "f", false, "Delete without confirmation")
+
+	authCmd.Flags().BoolP("list", "l", false, "List configured providers")
+	authCmd.Flags().StringP("remove", "r", "", "Remove a provider configuration")
+	authCmd.Flags().StringP("provider", "p", "", "Configure a specific provider")
+
 	rootCmd.AddCommand(newCmd)
 	rootCmd.AddCommand(listCmd)
 	rootCmd.AddCommand(openCmd)
 	rootCmd.AddCommand(reindexCmd)
 	rootCmd.AddCommand(exportCmd)
 	rootCmd.AddCommand(configCmd)
+	rootCmd.AddCommand(deleteCmd)
+	rootCmd.AddCommand(authCmd)
 }
 
 func runTUI(proj *project.Project) error {
@@ -703,19 +1410,9 @@ func runTUI(proj *project.Project) error {
 		return fmt.Errorf("failed to initialize app: %w", err)
 	}
 
-	globalConfig, err := application.Config.LoadGlobalConfig()
+	providerConfig, providerName, err := checkLLMProvider(application)
 	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
-	}
-
-	providerName := globalConfig.Defaults.Provider
-	if providerName == "" {
-		providerName = "openai"
-	}
-
-	providerConfig, err := application.Config.GetProviderConfig(providerName)
-	if err != nil {
-		return fmt.Errorf("failed to get provider config: %w", err)
+		return err
 	}
 
 	ctx := context.Background()
@@ -725,7 +1422,17 @@ func runTUI(proj *project.Project) error {
 	}
 	defer provider.Close()
 
-	model := tui.New(proj, provider, searchEngine)
+	modelName := providerConfig.DefaultModel
+	if modelName == "" {
+		modelName = providerName
+	}
+
+	baseURL := providerConfig.BaseURL
+	if providerName == "local" && baseURL == "" {
+		baseURL = "http://localhost:11434"
+	}
+
+	model := tui.New(proj, provider, searchEngine, modelName, providerName, baseURL)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {
