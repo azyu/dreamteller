@@ -666,13 +666,16 @@ func TestRenderChat(t *testing.T) {
 	assert.Contains(t, content, "System message")
 }
 
-func TestRenderChat_ShowsSpinnerWhenStreaming(t *testing.T) {
+func TestView_ShowsSpinnerWhenStreaming(t *testing.T) {
 	m := newTestModel(t)
 	m.streaming = true
+	m.ready = true
+	m.width = 80
 
-	content := m.renderChat()
+	content := m.View()
 
-	assert.Contains(t, content, "Thinking")
+	assert.Contains(t, content, "[esc]")
+	assert.Contains(t, content, "interrupt")
 }
 
 func TestRenderHelp(t *testing.T) {

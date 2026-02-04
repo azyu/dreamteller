@@ -611,28 +611,162 @@ func (m *Model) handleCommand(input string) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) startStream(userInput string) tea.Cmd {
-	systemPrompt := m.buildSystemPrompt(userInput)
-	chatMessages := m.buildChatMessages(systemPrompt)
-
-	req := llm.ChatRequest{
-		Messages:    chatMessages,
-		MaxTokens:   4096,
-		Temperature: 0.7,
-		Tools:       llm.PredefinedTools(),
-	}
+	provider := m.provider
+	project := m.project
+	contextMode := m.contextMode
+	searchEngine := m.searchEngine
+	messages := make([]Message, len(m.messages))
+	copy(messages, m.messages)
 
 	ctx, cancel := context.WithTimeout(context.Background(), DefaultStreamConfig().Timeout)
 	m.streamController = &StreamController{ctx: ctx, cancel: cancel, config: DefaultStreamConfig()}
 
-	provider := m.provider
-
 	return func() tea.Msg {
+		systemPrompt := buildSystemPromptAsync(project, contextMode, searchEngine, userInput)
+		chatMessages := buildChatMessagesAsync(systemPrompt, messages)
+
+		req := llm.ChatRequest{
+			Messages:    chatMessages,
+			MaxTokens:   4096,
+			Temperature: 0.7,
+			Tools:       llm.PredefinedTools(),
+		}
+
 		streamChan, err := provider.Stream(ctx, req)
 		if err != nil {
 			return StreamErrorMsg{Err: err}
 		}
 		return StreamReadyMsg{StreamChan: streamChan}
 	}
+}
+
+func buildSystemPromptAsync(proj *project.Project, contextMode ContextMode, searchEngine *search.FTSEngine, userInput string) string {
+	builder := llm.NewSystemPromptBuilder()
+	builder.AddRole(llm.DefaultNovelWritingPrompt())
+
+	if proj != nil && proj.Info != nil {
+		builder.AddProjectInfo(proj.Info.Name, proj.Config.Genre)
+		builder.AddWritingStyle(proj.Config.Writing)
+	}
+
+	switch contextMode {
+	case ContextEssential:
+		builder.AddContext(buildEssentialContextAsync(proj))
+
+	case ContextHybrid:
+		builder.AddContext(buildEssentialContextAsync(proj))
+		if searchEngine != nil && userInput != "" {
+			if searchContext := buildSearchContextAsync(searchEngine, userInput); searchContext != "" {
+				builder.AddContext("\n### Additional Search Results\n" + searchContext)
+			}
+		}
+
+	case ContextFull:
+		builder.AddContext(buildFullContextAsync(proj))
+	}
+
+	return builder.Build()
+}
+
+func buildEssentialContextAsync(proj *project.Project) string {
+	if proj == nil {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("\n## Story Context\n\n")
+
+	if characters, err := proj.LoadCharacters(); err == nil && len(characters) > 0 {
+		sb.WriteString("### Characters\n")
+		for _, c := range characters {
+			sb.WriteString(fmt.Sprintf("- **%s**: %s\n", c.Name, truncateForEssential(c.Description, 200)))
+		}
+		sb.WriteString("\n")
+	}
+
+	if settings, err := proj.LoadSettings(); err == nil && len(settings) > 0 {
+		sb.WriteString("### Settings\n")
+		for _, s := range settings {
+			sb.WriteString(fmt.Sprintf("- **%s**: %s\n", s.Name, truncateForEssential(s.Description, 200)))
+		}
+		sb.WriteString("\n")
+	}
+
+	if plots, err := proj.LoadPlots(); err == nil && len(plots) > 0 {
+		sb.WriteString("### Plot Points\n")
+		for _, p := range plots {
+			sb.WriteString(fmt.Sprintf("- **%s**: %s\n", p.Title, truncateForEssential(p.Description, 200)))
+		}
+		sb.WriteString("\n")
+	}
+
+	return sb.String()
+}
+
+func buildSearchContextAsync(searchEngine *search.FTSEngine, query string) string {
+	if searchEngine == nil {
+		return ""
+	}
+
+	results, err := searchEngine.Search(query, 5)
+	if err != nil || len(results) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	for _, r := range results {
+		sb.WriteString(fmt.Sprintf("**%s** (score: %.2f):\n%s\n\n", r.SourcePath, r.Score, r.Content))
+	}
+	return sb.String()
+}
+
+func buildFullContextAsync(proj *project.Project) string {
+	if proj == nil {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("\n## Complete Story Context\n\n")
+
+	if characters, err := proj.LoadCharacters(); err == nil && len(characters) > 0 {
+		sb.WriteString("### Characters\n\n")
+		for _, c := range characters {
+			sb.WriteString(fmt.Sprintf("#### %s\n%s\n\n", c.Name, c.Description))
+		}
+	}
+
+	if settings, err := proj.LoadSettings(); err == nil && len(settings) > 0 {
+		sb.WriteString("### Settings\n\n")
+		for _, s := range settings {
+			sb.WriteString(fmt.Sprintf("#### %s\n%s\n\n", s.Name, s.Description))
+		}
+	}
+
+	if plots, err := proj.LoadPlots(); err == nil && len(plots) > 0 {
+		sb.WriteString("### Plot\n\n")
+		for _, p := range plots {
+			sb.WriteString(fmt.Sprintf("#### %s\n%s\n\n", p.Title, p.Description))
+		}
+	}
+
+	return sb.String()
+}
+
+func buildChatMessagesAsync(systemPrompt string, messages []Message) []llm.ChatMessage {
+	chatMessages := []llm.ChatMessage{
+		llm.NewSystemMessage(systemPrompt),
+	}
+
+	for _, msg := range messages {
+		switch msg.Role {
+		case "user":
+			chatMessages = append(chatMessages, llm.NewUserMessage(msg.Content))
+		case "assistant":
+			chatMessages = append(chatMessages, llm.NewAssistantMessage(msg.Content))
+		}
+	}
+
+	return chatMessages
 }
 
 func (m *Model) readNextChunk() tea.Cmd {
@@ -857,10 +991,6 @@ func (m *Model) renderChat() string {
 			sb.WriteString(styles.SystemMessage.Render(msg.Content))
 		}
 		sb.WriteString("\n\n")
-	}
-
-	if m.streaming {
-		sb.WriteString(m.spinner.View() + " Thinking...")
 	}
 
 	return sb.String()
@@ -1093,13 +1223,25 @@ func (m *Model) View() string {
 	helpHint := styles.HelpKey.Render("/help") + styles.HelpDesc.Render(" for commands")
 
 	leftPart := modelInfo + "  " + contextInfo
-	gap := m.width - lipgloss.Width(leftPart) - lipgloss.Width(helpHint)
-	if gap < 0 {
-		gap = 0
+
+	if m.streaming {
+		spinnerPart := m.spinner.View() + " " + styles.HelpKey.Render("[esc]") + styles.HelpDesc.Render(" interrupt")
+		gap := m.width - lipgloss.Width(leftPart) - lipgloss.Width(spinnerPart)
+		if gap < 0 {
+			gap = 0
+		}
+		statusLine := leftPart + strings.Repeat(" ", gap) + spinnerPart
+		sb.WriteString("\n")
+		sb.WriteString(statusLine)
+	} else {
+		gap := m.width - lipgloss.Width(leftPart) - lipgloss.Width(helpHint)
+		if gap < 0 {
+			gap = 0
+		}
+		statusLine := leftPart + strings.Repeat(" ", gap) + helpHint
+		sb.WriteString("\n")
+		sb.WriteString(statusLine)
 	}
-	statusLine := leftPart + strings.Repeat(" ", gap) + helpHint
-	sb.WriteString("\n")
-	sb.WriteString(statusLine)
 
 	return sb.String()
 }
