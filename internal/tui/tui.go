@@ -558,9 +558,19 @@ func (m *Model) handleStreamChunk(msg StreamChunkMsg) (tea.Model, tea.Cmd) {
 			}
 			return model, tea.Batch(cmds...)
 		}
-		if len(m.messages) > 0 && m.messages[len(m.messages)-1].Role == "assistant" {
+
+		hasAssistantContent := len(m.messages) > 0 &&
+			m.messages[len(m.messages)-1].Role == "assistant" &&
+			m.messages[len(m.messages)-1].Content != ""
+
+		if hasAssistantContent {
 			m.saveMessage("assistant", m.messages[len(m.messages)-1].Content)
+		} else if msg.FinishReason != llm.FinishReasonContentFilter {
+			toast, toastCmd := showToast("응답을 받지 못했습니다 (콘텐츠가 차단되었을 수 있음)", ToastWarning, 5*time.Second)
+			m.toast = toast
+			cmds = append(cmds, toastCmd)
 		}
+
 		m.streamChan = nil
 		cmds = append(cmds, func() tea.Msg { return StreamDoneMsg{} })
 		return m, tea.Batch(cmds...)
