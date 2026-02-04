@@ -94,6 +94,8 @@ type Model struct {
 	modelSelectMode  bool
 	availableModels  []string
 	modelSelectIndex int
+
+	toast Toast
 }
 
 // New creates a new TUI model.
@@ -136,10 +138,57 @@ func New(proj *project.Project, provider llm.Provider, searchEngine *search.FTSE
 
 func (m *Model) Init() tea.Cmd {
 	m.loadHistory()
-	return tea.Batch(
+
+	cmds := []tea.Cmd{
 		textarea.Blink,
 		m.spinner.Tick,
-	)
+	}
+
+	if m.isFirstOpen() && m.provider != nil {
+		cmds = append(cmds, m.sendGreeting())
+	}
+
+	return tea.Batch(cmds...)
+}
+
+func (m *Model) isFirstOpen() bool {
+	return len(m.messages) == 0
+}
+
+func (m *Model) sendGreeting() tea.Cmd {
+	greetingPrompt := m.buildGreetingPrompt()
+
+	m.messages = append(m.messages, Message{
+		Role:    "user",
+		Content: greetingPrompt,
+	})
+	m.saveMessage("user", greetingPrompt)
+
+	m.streaming = true
+	m.inputMode = false
+
+	return tea.Batch(m.spinner.Tick, m.startStream(greetingPrompt))
+}
+
+func (m *Model) buildGreetingPrompt() string {
+	if m.project == nil || m.project.Info == nil {
+		return "안녕하세요! 이 프로젝트에 대해 간단히 소개해주시고, 어떤 장면부터 시작하면 좋을지 제안해주세요."
+	}
+
+	var parts []string
+	parts = append(parts, fmt.Sprintf("안녕하세요! '%s' 프로젝트를 시작합니다.", m.project.Info.Name))
+
+	if characters, err := m.project.LoadCharacters(); err == nil && len(characters) > 0 {
+		names := make([]string, 0, len(characters))
+		for _, c := range characters {
+			names = append(names, c.Name)
+		}
+		parts = append(parts, fmt.Sprintf("등장인물: %s", strings.Join(names, ", ")))
+	}
+
+	parts = append(parts, "현재 설정된 캐릭터와 배경을 간단히 요약하고, 어떤 장면부터 시작하면 좋을지 제안해주세요.")
+
+	return strings.Join(parts, " ")
 }
 
 func (m *Model) loadHistory() {
@@ -223,11 +272,24 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case StreamErrorMsg:
 		m.streaming = false
 		m.inputMode = true
-		m.err = msg.Err
 		m.textarea.Focus()
 
+		errText := "API Error"
+		if msg.Err != nil {
+			errText = msg.Err.Error()
+		}
+		toast, cmd := showToast(errText, ToastError, 5*time.Second)
+		m.toast = toast
+		return m, cmd
+
 	case errMsg:
-		m.err = msg.err
+		toast, cmd := showToast(msg.err.Error(), ToastError, 5*time.Second)
+		m.toast = toast
+		return m, cmd
+
+	case clearToastMsg:
+		m.toast.Update(msg)
+		return m, nil
 
 	case SuggestionMsg:
 		m.pendingSuggestion = msg.Suggestion
@@ -481,14 +543,27 @@ func (m *Model) handleStreamChunk(msg StreamChunkMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if msg.Done {
+		var cmds []tea.Cmd
+
+		if msg.FinishReason == llm.FinishReasonContentFilter {
+			toast, toastCmd := showToast("응답이 안전 필터에 의해 차단되었습니다", ToastWarning, 5*time.Second)
+			m.toast = toast
+			cmds = append(cmds, toastCmd)
+		}
+
 		if m.toolCallAccumulator.HasCalls() {
-			return m.processToolCalls()
+			model, cmd := m.processToolCalls()
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+			return model, tea.Batch(cmds...)
 		}
 		if len(m.messages) > 0 && m.messages[len(m.messages)-1].Role == "assistant" {
 			m.saveMessage("assistant", m.messages[len(m.messages)-1].Content)
 		}
 		m.streamChan = nil
-		return m, func() tea.Msg { return StreamDoneMsg{} }
+		cmds = append(cmds, func() tea.Msg { return StreamDoneMsg{} })
+		return m, tea.Batch(cmds...)
 	}
 
 	return m, tea.Batch(m.spinner.Tick, m.readNextChunk())
@@ -789,9 +864,10 @@ func (m *Model) readNextChunk() tea.Cmd {
 		}
 
 		return StreamChunkMsg{
-			Content:  chunk.Delta,
-			ToolCall: chunk.ToolCall,
-			Done:     chunk.Done,
+			Content:      chunk.Delta,
+			ToolCall:     chunk.ToolCall,
+			Done:         chunk.Done,
+			FinishReason: chunk.FinishReason,
 		}
 	}
 }
@@ -1247,13 +1323,21 @@ func (m *Model) View() string {
 		sb.WriteString(statusLine)
 	}
 
-	return sb.String()
+	appView := sb.String()
+
+	if m.toast.Visible {
+		toastView := m.toast.View(m.width / 2)
+		appView = renderToastTopRight(toastView, appView, 2)
+	}
+
+	return appView
 }
 
 type StreamChunkMsg struct {
-	Content  string
-	ToolCall *llm.ToolCallDelta
-	Done     bool
+	Content      string
+	ToolCall     *llm.ToolCallDelta
+	Done         bool
+	FinishReason string
 }
 
 type StreamDoneMsg struct{}

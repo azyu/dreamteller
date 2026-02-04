@@ -475,7 +475,8 @@ func TestStreamErrorMsg(t *testing.T) {
 
 	assert.False(t, m.streaming)
 	assert.True(t, m.inputMode)
-	assert.Equal(t, assert.AnError, m.err)
+	assert.True(t, m.toast.Visible)
+	assert.Contains(t, m.toast.Message, "assert.AnError")
 }
 
 // ============================================================================
@@ -961,7 +962,8 @@ func TestErrMsg(t *testing.T) {
 	model, _ := m.Update(errMsg{err: assert.AnError})
 	m = model.(*Model)
 
-	assert.Equal(t, assert.AnError, m.err)
+	assert.True(t, m.toast.Visible)
+	assert.Contains(t, m.toast.Message, "assert.AnError")
 }
 
 // ============================================================================

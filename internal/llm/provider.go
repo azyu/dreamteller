@@ -40,10 +40,11 @@ const (
 
 // FinishReason constants for response completion reasons.
 const (
-	FinishReasonStop      = "stop"
-	FinishReasonLength    = "length"
-	FinishReasonToolCalls = "tool_calls"
-	FinishReasonError     = "error"
+	FinishReasonStop          = "stop"
+	FinishReasonLength        = "length"
+	FinishReasonToolCalls     = "tool_calls"
+	FinishReasonError         = "error"
+	FinishReasonContentFilter = "content_filter"
 )
 
 // Provider defines the interface for LLM providers.

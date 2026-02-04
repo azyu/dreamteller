@@ -286,7 +286,13 @@ func (a *GeminiAdapter) buildConfig(req llm.ChatRequest, systemInstruction *gena
 		config.StopSequences = req.Stop
 	}
 
-	// Convert tools
+	config.SafetySettings = []*genai.SafetySetting{
+		{Category: genai.HarmCategoryHarassment, Threshold: genai.HarmBlockThresholdBlockNone},
+		{Category: genai.HarmCategoryHateSpeech, Threshold: genai.HarmBlockThresholdBlockNone},
+		{Category: genai.HarmCategorySexuallyExplicit, Threshold: genai.HarmBlockThresholdBlockNone},
+		{Category: genai.HarmCategoryDangerousContent, Threshold: genai.HarmBlockThresholdBlockNone},
+	}
+
 	if len(req.Tools) > 0 {
 		config.Tools = a.convertTools(req.Tools)
 	}
@@ -433,7 +439,7 @@ func (a *GeminiAdapter) convertFinishReason(reason genai.FinishReason) string {
 	case genai.FinishReasonMaxTokens:
 		return llm.FinishReasonLength
 	case genai.FinishReasonSafety, genai.FinishReasonRecitation, genai.FinishReasonBlocklist:
-		return llm.FinishReasonStop
+		return llm.FinishReasonContentFilter
 	default:
 		if reason != "" {
 			return string(reason)
