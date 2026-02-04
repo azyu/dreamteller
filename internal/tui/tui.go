@@ -147,17 +147,25 @@ func (m *Model) loadHistory() {
 		return
 	}
 
-	history, err := m.project.DB.GetConversationHistory(50)
+	history, err := m.project.DB.GetConversationHistory(defaultHistoryLoadLimit)
 	if err != nil {
 		return
 	}
 
+	msgs := make([]Message, 0, len(history))
 	for _, record := range history {
-		m.messages = append(m.messages, Message{
-			Role:    record.Role,
-			Content: record.Content,
-		})
+		msgs = append(msgs, Message{Role: record.Role, Content: record.Content})
 	}
+
+	// Budget-aware truncation for what we keep in memory.
+	// If provider is not available, keep the DB ordering as-is.
+	if m.provider != nil {
+		if env, err := newAssemblyEnv(m.project, m.provider, m.modelName); err == nil {
+			msgs = truncateTUIMessagesToBudget(env.tokenizer, msgs, env.budget.History)
+		}
+	}
+
+	m.messages = append(m.messages, msgs...)
 }
 
 func (m *Model) saveMessage(role, content string) {
@@ -622,15 +630,11 @@ func (m *Model) startStream(userInput string) tea.Cmd {
 	m.streamController = &StreamController{ctx: ctx, cancel: cancel, config: DefaultStreamConfig()}
 
 	return func() tea.Msg {
-		systemPrompt := buildSystemPromptAsync(project, contextMode, searchEngine, userInput)
-		chatMessages := buildChatMessagesAsync(systemPrompt, messages)
-
-		req := llm.ChatRequest{
-			Messages:    chatMessages,
-			MaxTokens:   4096,
-			Temperature: 0.7,
-			Tools:       llm.PredefinedTools(),
+		assembled, err := assembleChatRequest(project, provider, m.modelName, contextMode, searchEngine, messages)
+		if err != nil {
+			return StreamErrorMsg{Err: err}
 		}
+		req := assembled.Request
 
 		streamChan, err := provider.Stream(ctx, req)
 		if err != nil {

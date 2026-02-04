@@ -10,10 +10,10 @@ import (
 
 // ContextManager manages context injection for LLM prompts.
 type ContextManager struct {
-	config      types.ContextConfig
-	budget      types.BudgetConfig
-	maxTokens   int
-	tokenizer   TokenCounter
+	config    types.ContextConfig
+	budget    types.BudgetConfig
+	maxTokens int
+	tokenizer TokenCounter
 }
 
 // TokenCounter interface for counting tokens.
@@ -174,21 +174,20 @@ func (cm *ContextManager) SummarizeHistory(messages []ChatMessage, maxMessages i
 	// Keep the most recent maxMessages
 	remaining = messages[len(messages)-maxMessages:]
 
-	// Summarize the older messages
+	// Summarize the older messages (deterministic; no LLM call).
 	oldMessages := messages[:len(messages)-maxMessages]
 	var sb strings.Builder
-	sb.WriteString("Previous conversation summary:\n")
 
 	for _, msg := range oldMessages {
 		switch msg.Role {
 		case RoleUser:
 			// Extract key points from user messages
 			content := truncateString(msg.Content, 100)
-			sb.WriteString(fmt.Sprintf("- User asked about: %s\n", content))
+			sb.WriteString(fmt.Sprintf("- 사용자: %s\n", content))
 		case RoleAssistant:
 			// Extract key points from assistant messages
 			content := truncateString(msg.Content, 100)
-			sb.WriteString(fmt.Sprintf("- Assistant: %s\n", content))
+			sb.WriteString(fmt.Sprintf("- 어시스턴트: %s\n", content))
 		}
 	}
 
