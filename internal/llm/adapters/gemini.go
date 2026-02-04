@@ -287,10 +287,11 @@ func (a *GeminiAdapter) buildConfig(req llm.ChatRequest, systemInstruction *gena
 	}
 
 	config.SafetySettings = []*genai.SafetySetting{
-		{Category: genai.HarmCategoryHarassment, Threshold: genai.HarmBlockThresholdBlockNone},
-		{Category: genai.HarmCategoryHateSpeech, Threshold: genai.HarmBlockThresholdBlockNone},
-		{Category: genai.HarmCategorySexuallyExplicit, Threshold: genai.HarmBlockThresholdBlockNone},
-		{Category: genai.HarmCategoryDangerousContent, Threshold: genai.HarmBlockThresholdBlockNone},
+		{Category: genai.HarmCategoryHarassment, Threshold: genai.HarmBlockThresholdOff},
+		{Category: genai.HarmCategoryHateSpeech, Threshold: genai.HarmBlockThresholdOff},
+		{Category: genai.HarmCategorySexuallyExplicit, Threshold: genai.HarmBlockThresholdOff},
+		{Category: genai.HarmCategoryDangerousContent, Threshold: genai.HarmBlockThresholdOff},
+		{Category: genai.HarmCategoryCivicIntegrity, Threshold: genai.HarmBlockThresholdOff},
 	}
 
 	if len(req.Tools) > 0 {
@@ -386,13 +387,18 @@ func (a *GeminiAdapter) convertResponse(result *genai.GenerateContentResponse) (
 func (a *GeminiAdapter) convertStreamChunk(result *genai.GenerateContentResponse) llm.StreamChunk {
 	chunk := llm.StreamChunk{}
 
+	if result.PromptFeedback != nil && result.PromptFeedback.BlockReason != "" {
+		chunk.FinishReason = llm.FinishReasonContentFilter
+		chunk.Done = true
+		return chunk
+	}
+
 	if len(result.Candidates) == 0 {
 		return chunk
 	}
 
 	candidate := result.Candidates[0]
 
-	// Extract text content
 	if candidate.Content != nil {
 		for i, part := range candidate.Content.Parts {
 			if part.Text != "" {
@@ -413,13 +419,11 @@ func (a *GeminiAdapter) convertStreamChunk(result *genai.GenerateContentResponse
 		}
 	}
 
-	// Convert finish reason
 	if candidate.FinishReason != "" {
 		chunk.FinishReason = a.convertFinishReason(candidate.FinishReason)
 		chunk.Done = true
 	}
 
-	// Convert usage if available
 	if result.UsageMetadata != nil {
 		chunk.Usage = &llm.TokenUsage{
 			PromptTokens:     int(result.UsageMetadata.PromptTokenCount),
